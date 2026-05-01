@@ -1,126 +1,121 @@
-# ipa-remote
+# ScreenMirror
 
-Mirror y control remoto de un iPhone con jailbreak desde un Mac, sobre la red local, con cifrado de extremo a extremo.
+End-to-end encrypted screen mirroring and remote control between a jailbroken iPhone (or iPad) and a Mac, over the local network.
 
-El iPhone captura su pantalla en H.264, la cifra con AES-256-GCM y la envía a un servidor que corre en macOS. El servidor decodifica el stream en tiempo real, lo muestra en una ventana y reenvía toques, swipes, teclas y botones físicos al iPhone.
+The iPhone captures its own screen, encodes it as H.264, encrypts everything with AES-256-GCM, and pushes the stream to a server running on macOS. The server decodes the video in real time, displays it in a window, and forwards mouse, keyboard, swipes, and physical-button presses back to the iPhone.
 
 ```
 ┌─────────────────────┐         AES-256-GCM           ┌─────────────────────┐
 │  iPhone (jailbreak) │  ───── X25519 ephemeral ───→  │   ScreenMirror.app  │
-│  SpringBoard tweak  │   PBKDF2-SHA512 + password    │   macOS 12+ AppKit  │
-│  H.264 / 60-fps cap │  ←───── HID inyectado ────── │   AVSampleBuffer    │
-└─────────────────────┘     TCP :4878 / Bonjour       └─────────────────────┘
+│  SpringBoard tweak  │   PBKDF2-SHA512 + password    │     macOS 12+       │
+│  H.264 / VTCompress │  ←──── HID input injection ── │   AVSampleBuffer    │
+└─────────────────────┘    TCP :4878 / Bonjour        └─────────────────────┘
 ```
 
-## Características
+## Features
 
-- **Streaming en vivo H.264** con presets de calidad (Low / Medium / High) seleccionables desde la UI.
-- **Control remoto completo**: ratón, teclado, gestos sintéticos (swipe, multi-finger), botones físicos (Home, Lock, Vol+/-, Mute, Siri).
-- **Navegación rápida** desde la barra superior: páginas previa/siguiente, App Switcher, Centro de Notificaciones.
-- **Detección automática de form factor** (Home button / Face ID / iPad) y de versión de iOS para enviar los gestos correctos.
-- **Cifrado de extremo a extremo**:
-  - X25519 efímero por sesión (forward secrecy).
-  - PBKDF2-SHA512 con 600 000 iteraciones para derivar la clave del password compartido.
-  - HKDF-SHA256 mezcla el secreto compartido + PBKDF2 → AES-256-GCM.
-  - Contadores monótonos como IV; sin reuso.
-- **Multi-dispositivo**: la app abre un selector con tu historial de iPhones; puedes elegir uno o varios y se abre una ventana por cada uno.
-- **Modo minimalista**: oculta la cromía y deja sólo la pantalla del dispositivo (⌘.).
-- **Popover de información** del dispositivo (modelo, iOS, resolución, peer, cifrado).
-- **Bonjour** (`_smirror._tcp.`) para que el iPhone descubra el Mac sin teclear IPs.
+- **Live H.264 streaming** with selectable quality presets (Low / Medium / High) tunable from the Mac UI without reconnecting.
+- **Remote control**: mouse, keyboard, synthesised gestures (swipes, multi-finger), physical buttons (Home, Lock, Vol±, Mute, Siri).
+- **Quick-nav bar**: previous page, next page, App Switcher, Notification Center, with form-factor-aware gestures (Home button vs Face ID vs iPad, branching on iOS major version).
+- **End-to-end encryption**:
+  - Per-session ephemeral X25519 keys (forward secrecy).
+  - PBKDF2-SHA512 600 000 iterations to stretch the shared password (OWASP 2023+ guidance).
+  - HKDF-SHA256 mixes the X25519 shared secret + PBKDF2 output → 256-bit AES key.
+  - Monotonic counter IVs; no IV reuse.
+- **Multi-device support**: launch picker lists every iPhone/iPad you've ever paired with. Pick one (or multiple, ⌘-click) and a streaming window opens per device. The shared TCP listener routes incoming connections to the right window based on the device descriptor.
+- **Minimalist mode** (⌘.) hides every chrome element so only the device screen is visible.
+- **Device info popover** (⌘I) with model, iOS version, resolution, peer, encryption details.
+- **Bonjour** (`_smirror._tcp.`) for zero-config discovery — no need to type IPs into the iOS control app.
 
-## Arquitectura
+## Architecture
 
 ```
 ┌──────────────────────────── iPhone (SpringBoard tweak) ────────────────────────────┐
 │                                                                                    │
 │  ScreenCapture ─→ VideoEncoder ─→ NetworkClient ──┐                                │
 │  (CARenderServer /                  (X25519 +     │                                │
-│   _UICreateScreenUIImage)            PBKDF2 +     │ TCP cifrado                   │
-│                                      AES-GCM)     │                                │
+│   _UICreateScreenUIImage              PBKDF2 +    │  encrypted TCP                 │
+│   fallback)                           AES-GCM)    │                                │
 │                                                   │                                │
 │  TouchInjector ←── NetworkClient ◀────────────────┘                                │
 │  (IOHIDEventSystemClient,                                                          │
 │   Hand transducer)                                                                 │
 │                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────┘
-                                    ▲
-                                    │ tweak controla un app de control con UI iOS
-                                    │ que persiste host/password/enabled en un plist
-                                    ▼
-                          ScreenMirrorControl.app (iPhone)
+                            ▲
+                            │ Reads host/password from a plist; the
+                            │ ScreenMirrorControl iOS app edits that plist
+                            │ and posts a Darwin notification to reconnect.
+                            ▼
+                  ScreenMirrorControl.app (iPhone)
 
 ┌──────────────────────────── Mac (AppKit) ──────────────────────────────────────────┐
 │                                                                                    │
-│  DevicePickerWindow ─→ MainWindowController(targetDevice) ──────┐                  │
-│                                                                  │                  │
-│  ConnectionRouter ◀─── NetworkServer (1 listener, N peers)       │                  │
-│   ↓ rutea por handshake                                          │                  │
-│  MainWindowController.routerReceivedMessage                      │                  │
-│   ↓                                                              │                  │
-│  VideoDecoder (VTDecompressionSession) ─→ DeviceView (AVSBDisplayLayer)             │
+│  AppDelegate ──→ DevicePickerWindowController                                      │
+│        │                  │                                                        │
+│        │                  └──→ MainWindowController(targetDevice: A)               │
+│        ├────────────────────→ MainWindowController(targetDevice: B)                │
+│        │                                                                           │
+│  ConnectionRouter (singleton)                                                      │
+│   └─ NetworkServer (1 listener on :4878, N peers, AES-GCM)                         │
+│      └─ delegate routes by SMIR_HANDSHAKE.deviceName / iOS / resolution            │
 │                                                                                    │
-│  DeviceView ─→ EventForwarder ─→ NetworkServer.send ─→ iPhone                      │
+│  Each window: VideoDecoder ─→ DeviceView (AVSampleBufferDisplayLayer)              │
+│                EventForwarder ─→ NetworkServer.send → iPhone                       │
 │                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Detalles del wire format en [`PROTOCOL.md`](PROTOCOL.md).
+The wire format is documented in [`PROTOCOL.md`](PROTOCOL.md).
 
-## Requisitos
+## Requirements
 
 ### Mac
 
-- macOS 12 (Monterey) o superior.
-- Xcode 14+ con Swift 5.7+ (bastan las Command Line Tools: `xcode-select --install`).
-- Conexión a la misma red local que el iPhone.
+- macOS 12 (Monterey) or newer.
+- Xcode 14+ with Swift 5.7+ (Command Line Tools are enough: `xcode-select --install`).
+- On the same local network as the iPhone.
 
-### iPhone
+### iPhone / iPad
 
-- Jailbreak rootless (palera1n, Dopamine, …) en iOS 11–16.7. El binario se compila para `arm64` y `arm64e`.
-- Acceso SSH al dispositivo (puerto 22 abierto, password conocido — el de `mobile`).
-- [Theos](https://theos.dev/) instalado en el Mac, con la variable de entorno `THEOS` apuntando a su raíz (típicamente `~/theos`).
+- A **rootless** jailbreak (palera1n, Dopamine) on iOS 11–18. The tweak builds for both `arm64` and `arm64e`.
+- SSH access enabled, with the `mobile` user's password known.
+- iOS 18 has been observed to work on at least one device (iPad7,11) but SpringBoard launch on iOS 18 can be flaky for reasons unrelated to this tweak (the iCloud Family Sharing daemon sometimes deadlocks SpringBoard's main thread). If you hit a SpringBoard crash loop, see [Troubleshooting](#troubleshooting).
+- [Theos](https://theos.dev/) installed on the build Mac, with `THEOS` in your environment (typically `~/theos`).
 
-## Instalación
+## Installation
 
-### 1. Clona el repo
+### 1. Clone
 
 ```sh
-git clone https://github.com/<tu-usuario>/ipa-remote.git
+git clone https://github.com/<your-user>/ipa-remote.git
 cd ipa-remote
 ```
 
-### 2. Compila e instala la app del Mac
+### 2. Build and install the Mac app
+
+The repository includes a one-shot script that builds a release binary, generates the icon, assembles a `.app`, ad-hoc signs it, and drops it into `/Applications`:
 
 ```sh
-cd mac
-swift build -c release
-```
-
-Esto produce el binario en `mac/.build/arm64-apple-macosx/release/ScreenMirrorServer`.
-
-Para empaquetar en un `.app` con icono, instalarlo en `/Applications` y firmarlo ad-hoc en un solo paso, usa el helper:
-
-```sh
-cd ..
 ./scripts/install-mac-app.sh
 open /Applications/ScreenMirror.app
 ```
 
-Si prefieres hacerlo a mano:
+If you prefer to do it by hand:
 
 ```sh
+cd mac
+swift build -c release
 APP=/Applications/ScreenMirror.app
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp mac/.build/arm64-apple-macosx/release/ScreenMirrorServer "$APP/Contents/MacOS/ScreenMirror"
-cp mac/Resources/Info.plist "$APP/Contents/Info.plist"
-# Genera el icono opcional (si lo omites, macOS dibujará un icono genérico):
-swift scripts/generate_icon.swift /tmp/icon.png
-# (luego construye el .iconset y conviértelo con iconutil — ver scripts/install-mac-app.sh)
+cp .build/arm64-apple-macosx/release/ScreenMirrorServer "$APP/Contents/MacOS/ScreenMirror"
+cp Resources/Info.plist "$APP/Contents/Info.plist"
+swift ../scripts/generate_icon.swift /tmp/icon.png    # optional; macOS will use a generic icon otherwise
 codesign --force --deep --sign - "$APP"
 open "$APP"
 ```
 
-Para arrastrarla al Dock basta con tirarla desde Finder, o:
+To pin to the Dock, drag from Finder, or:
 
 ```sh
 defaults write com.apple.dock persistent-apps -array-add \
@@ -128,204 +123,225 @@ defaults write com.apple.dock persistent-apps -array-add \
 killall Dock
 ```
 
-### 3. Compila el tweak para el iPhone
-
-Asegúrate de tener Theos:
+### 3. Build the iOS tweak
 
 ```sh
 git clone --recursive https://github.com/theos/theos.git ~/theos
 export THEOS=~/theos
-```
 
-Compila el tweak para jailbreak rootless:
-
-```sh
 cd ios
 THEOS_PACKAGE_SCHEME=rootless make package FINALPACKAGE=1
 ```
 
-El `.deb` queda en `ios/packages/com.example.screenmirror_*.deb`.
+The `.deb` lands in `ios/packages/`.
 
-> **Nota**: si tu jailbreak es **rootful** (Unc0ver, Chimera, antiguos checkra1n), omite `THEOS_PACKAGE_SCHEME=rootless`. El paquete entonces se instalará en `/Library/MobileSubstrate/...` en lugar de `/var/jb/Library/MobileSubstrate/...`.
+> If your jailbreak is **rootful** (Unc0ver, classic checkra1n), drop `THEOS_PACKAGE_SCHEME=rootless`. The package then targets `/Library/MobileSubstrate/...` instead of `/var/jb/Library/MobileSubstrate/...`.
 
-### 4. (Opcional) Compila la app de control para el iPhone
+### 4. (Optional) Build the iPhone control app
 
-La app de control corre en el iPhone y permite cambiar host/password sin SSH:
+The control app provides a small UI on the device for changing host/password without SSH:
 
 ```sh
 cd ios/control-app
 THEOS_PACKAGE_SCHEME=rootless make package FINALPACKAGE=1
 ```
 
-### 5. Despliega ambos paquetes en el iPhone
+### 5. Deploy to the iPhone
 
-Por SSH:
+Over SSH:
 
 ```sh
-# Tweak
-scp ios/packages/com.example.screenmirror_*.deb mobile@<IP-iPhone>:/var/mobile/sm.deb
-ssh mobile@<IP-iPhone> 'sudo dpkg -i /var/mobile/sm.deb && sudo killall -9 SpringBoard'
+# Tweak (mandatory)
+scp ios/packages/com.example.screenmirror_*.deb mobile@<iphone-ip>:/var/mobile/sm.deb
+ssh mobile@<iphone-ip> 'sudo dpkg -i /var/mobile/sm.deb && sudo killall -9 SpringBoard'
 
-# App de control
-scp ios/control-app/packages/com.example.screenmirror-control_*.deb mobile@<IP-iPhone>:/var/mobile/smc.deb
-ssh mobile@<IP-iPhone> 'sudo dpkg -i /var/mobile/smc.deb'
+# Control app (optional)
+scp ios/control-app/packages/com.example.screenmirror-control_*.deb mobile@<iphone-ip>:/var/mobile/smc.deb
+ssh mobile@<iphone-ip> 'sudo dpkg -i /var/mobile/smc.deb'
 ```
 
-`killall SpringBoard` (respring) es necesario después de instalar el tweak para que SpringBoard cargue el dylib.
+`killall SpringBoard` (a respring) is required after installing the tweak so SpringBoard re-loads the dylib.
 
-## Configuración
+## Configuration
 
-### Password compartido
+### Shared password
 
-El tráfico se cifra con una clave derivada del password compartido. **Tiene que ser idéntico en los dos lados** o el handshake fallará silenciosamente con `decrypt failed`.
+All traffic is encrypted with a key derived from a shared password. **It must be byte-identical on both ends** or every encrypted message will fail authentication and the connection drops silently with `decrypt failed`.
 
-- **Mac**: la primera vez que abras la app te pedirá el password. Mínimo 8 caracteres. Se guarda en `~/Library/Preferences/com.example.ScreenMirrorServer.plist` (suite `com.example.ScreenMirrorServer`, clave `smir-shared-password`). Puedes cambiarlo desde el botón **Password** en la barra inferior, o desde el menú **ScreenMirror → Change Password…** (⌘,).
-- **iPhone**, opción A — **app de control**: abre **ScreenMirror** en el iPhone, escribe la IP del Mac y el mismo password, deja el switch en **on**, pulsa **Apply and reconnect**.
-- **iPhone**, opción B — **manual**: edita por SSH `/var/mobile/Library/Preferences/com.example.screenmirror.plist`:
+- **Mac**: the first launch prompts you. Minimum 8 characters. Saved in `~/Library/Preferences/com.example.ScreenMirrorServer.plist` (suite `com.example.ScreenMirrorServer`, key `smir-shared-password`). Change it later with the **Password** button in the bottom bar, or via the **ScreenMirror → Change Password…** menu (⌘,).
+- **iPhone, option A — control app**: open **ScreenMirror** on the device, type the Mac IP (or pick from the Bonjour list) and the same password, leave the toggle **on**, tap **Apply and reconnect**.
+- **iPhone, option B — manual**: edit `/var/mobile/Library/Preferences/com.example.screenmirror.plist`:
 
   ```xml
   <?xml version="1.0" encoding="UTF-8"?>
   <plist version="1.0">
   <dict>
       <key>host</key><string>192.168.1.42</string>
-      <key>password</key><string>tu-password-secreto</string>
+      <key>password</key><string>your-secret-password</string>
       <key>enabled</key><true/>
   </dict>
   </plist>
   ```
 
-  El tweak releerá el archivo en cada intento de reconexión (cada 5 s).
+  The tweak re-reads this file on every reconnection attempt (every 5 s while disconnected and `enabled=true`).
 
-### Bonjour (descubrimiento automático)
+### Bonjour (auto-discovery)
 
-El Mac se anuncia como `_smirror._tcp.` en `local.`. En la app de control puedes pulsar el botón de Bonjour para autodescubrir el Mac sin teclear IPs.
+The Mac advertises `_smirror._tcp.` on `local.`. In the iOS control app, the Bonjour button auto-discovers the Mac without manual IP entry.
 
-## Uso
+## Usage
 
-1. Abre **ScreenMirror.app** en el Mac (Dock, Spotlight, o `open /Applications/ScreenMirror.app`).
-2. La primera vez que cualquier iPhone conecte, su entrada se guarda en el historial; en arranques posteriores aparece el **picker de dispositivos**:
-   - Selecciona un dispositivo (o varios con ⌘-click) y pulsa **Connect** — se abrirá una ventana por cada selección.
-   - O pulsa **Listen for any device** para abrir una ventana sin filtro que acepta el primer iPhone que conecte.
-3. En el iPhone, asegúrate de que el tweak está cargado (si acabas de instalarlo, hace falta `killall SpringBoard`). El tweak se reconecta automáticamente cada 5 s mientras el switch en la app de control esté **on**.
-4. Una vez conectado:
-   - **Click** = tap.
-   - **Click + arrastrar** = swipe.
-   - **Teclado** = se reenvía como HID al iPhone.
-   - **Botones inferiores**: Home, Lock, Vol +/-, Mute, Siri (mantener pulsado para Siri).
-   - **Barra superior**: Página anterior, Página siguiente, App Switcher, Notificaciones.
-   - **⌘.** = modo minimalista (sólo la pantalla).
-   - **⌘I** = info del dispositivo.
-   - **⌘1 / ⌘2 / ⌘3** = calidad Baja / Media / Alta.
+1. Open **ScreenMirror.app** on the Mac (Dock, Spotlight, or `open /Applications/ScreenMirror.app`).
+2. The device picker appears as soon as your history contains at least one device. Select one (or several with ⌘-click) and click **Connect** — a streaming window opens per selection. Or click **Listen for any device** to open a single catch-all window that takes whichever iPhone connects first.
+3. On the iPhone the tweak retries every 5 s while `enabled=true`. After a fresh install you need a `killall SpringBoard` so the dylib loads.
+4. Once a device is streaming:
+   - **Mouse click** = tap.
+   - **Click + drag** = swipe (with realistic 120 Hz easeOutQuad easing; edge swipes auto-add an 80 ms initial dwell so SpringBoard's edge gesture recognizer fires).
+   - **Keyboard** is forwarded as HID.
+   - **Bottom button bar**: Home, Lock, Vol±, Mute (toggles audio category mute via `AVSystemController`), Siri (press and hold).
+   - **Top nav bar**: Previous Page, Next Page, App Switcher, Notification Center.
+   - **⌘.** toggles minimalist mode (only the device screen is visible).
+   - **⌘I** opens the device-info popover.
+   - **⌘1 / ⌘2 / ⌘3** = quality preset Low / Medium / High; the iPhone hot-restarts its capture/encoder pipeline in ~25 ms.
 
-## Estructura del repositorio
+## Repository layout
 
 ```
 ipa-remote/
-├── README.md                     ← este archivo
-├── PROTOCOL.md                   ← formato del wire (HELLO, mensajes cifrados)
+├── README.md                     ← this file
+├── PROTOCOL.md                   ← full wire format (HELLO, encrypted frames, message types)
+├── scripts/
+│   ├── generate_icon.swift       ← Core Graphics renderer for the 1024×1024 master icon
+│   └── install-mac-app.sh        ← build + bundle + sign + install one-shot
 ├── ios/
-│   ├── Makefile                  ← Theos: produce el tweak rootless
-│   ├── ScreenMirror.plist        ← MobileSubstrate filter (carga sólo en SpringBoard)
-│   ├── entitlements.plist        ← entitlements privados HID/IOSurface
+│   ├── Makefile                  ← Theos: produces the rootless tweak .deb
+│   ├── ScreenMirror.plist        ← MobileSubstrate filter (loads only into SpringBoard)
+│   ├── entitlements.plist        ← private HID/IOSurface entitlements
 │   ├── src/
-│   │   ├── Tweak.x               ← controlador principal del tweak
-│   │   ├── ScreenCapture.{h,m}   ← captura con CARenderServer / fallback
-│   │   ├── VideoEncoder.{h,m}    ← VTCompressionSession H.264
-│   │   ├── NetworkClient.{h,m}   ← cliente TCP + handshake X25519 + AES-GCM
+│   │   ├── Tweak.x               ← controller (NetworkClient + capture + injector)
+│   │   ├── ScreenCapture.{h,m}   ← CARenderServer + _UICreateScreenUIImage fallback
+│   │   ├── VideoEncoder.{h,m}    ← VTCompressionSession (H.264)
+│   │   ├── NetworkClient.{h,m}   ← TCP client + HELLO/X25519 + AES-GCM
 │   │   ├── TouchInjector.{h,m}   ← IOHIDEventSystemClient (Hand transducer)
-│   │   ├── Crypto.{h,m}          ← PBKDF2-SHA512 + HKDF-SHA256
-│   │   ├── X25519.{h,c}          ← scalarmult basado en TweetNaCl
-│   │   └── Protocol.h            ← tipos de mensaje + estructuras
-│   └── control-app/              ← app iOS para configurar host/password
+│   │   ├── Crypto.{h,m}          ← PBKDF2-SHA512 + HKDF-SHA256 + GCM backend probe
+│   │   ├── X25519.{h,c}          ← TweetNaCl-derived scalarmult
+│   │   └── Protocol.h            ← message types + payload structs
+│   └── control-app/              ← iOS app for editing host/password
 │       └── src/
-│           ├── ViewController.m  ← UI principal
+│           ├── ViewController.m
 │           └── AppDelegate.m
 └── mac/
     ├── Package.swift
-    ├── Resources/Info.plist
+    ├── Resources/Info.plist      ← bundle metadata for the .app
     └── Sources/ScreenMirrorServer/
         ├── main.swift
-        ├── AppDelegate.swift             ← arranca server + muestra picker
-        ├── DevicePickerWindowController  ← lista del historial
-        ├── DeviceHistory.swift           ← persistencia del listado
-        ├── ConnectionRouter.swift        ← rutea conexiones a la ventana correcta
-        ├── MainWindowController.swift    ← ventana de streaming (una por device)
-        ├── NetworkServer.swift           ← listener TCP + handshake servidor
+        ├── AppDelegate.swift             ← starts router, shows picker
+        ├── DevicePickerWindowController  ← table of remembered devices
+        ├── DeviceHistory.swift           ← persistence (UserDefaults JSON)
+        ├── ConnectionRouter.swift        ← single-listener fan-out by handshake
+        ├── MainWindowController.swift    ← one streaming window per device
+        ├── NetworkServer.swift           ← TCP listener + server-side HELLO
         ├── Crypto.swift                  ← CryptoKit + CommonCrypto
         ├── VideoDecoder.swift            ← VTDecompressionSession
         ├── DeviceView.swift              ← AVSampleBufferDisplayLayer + input
-        ├── EventForwarder.swift          ← serializa toques/swipes/teclas/botones
-        ├── NavBar.swift                  ← barra superior con accesos rápidos
-        ├── ButtonBar.swift               ← botones físicos del iPhone
-        ├── ConnectionOverlay.swift       ← animación "esperando / cifrando"
-        ├── Quality.swift                 ← presets Low / Medium / High
-        └── Keychain.swift                ← persistencia del password
+        ├── EventForwarder.swift          ← serialises touches/swipes/keys/buttons
+        ├── NavBar.swift                  ← top quick-nav bar
+        ├── ButtonBar.swift               ← bottom physical-button bar
+        ├── ConnectionOverlay.swift       ← waiting / authenticating / streaming overlay
+        ├── Quality.swift                 ← Low / Medium / High preset table
+        └── Keychain.swift                ← shared-password persistence
 ```
 
-## Solución de problemas
+## Troubleshooting
 
-### `decrypt failed — password incorrect` en el log del Mac
+### `decrypt failed — wrong password` on the Mac log
 
-El password del Mac y el del iPhone no coinciden. Verifica:
+The two passwords don't match. Verify both:
 
 ```sh
 # Mac
 defaults read com.example.ScreenMirrorServer smir-shared-password
 
 # iPhone
-ssh mobile@<IP> 'cat /var/mobile/Library/Preferences/com.example.screenmirror.plist'
+ssh mobile@<ip> 'cat /var/mobile/Library/Preferences/com.example.screenmirror.plist'
 ```
 
-Tienen que ser idénticos byte-a-byte.
+`defaults` may serve cached values. The authoritative file is `~/Library/Preferences/com.example.ScreenMirrorServer.plist` — read it with `plutil -p` for a fresh value.
 
-### El icono del Dock no se actualiza tras una recompilación
+### Dock icon doesn't refresh after a rebuild
 
 ```sh
 touch /Applications/ScreenMirror.app
 killall Dock
-# o si persiste:
+# If it still won't update:
 rm -rf ~/Library/Caches/com.apple.iconservices.store
 sudo find /private/var/folders/ -name com.apple.dock.iconcache -exec rm {} \;
 killall Dock
 ```
 
-### `IOSurface NULL` o pantalla negra en el Mac
+### Black screen on the Mac
 
-El backend de captura del iPhone está cayendo a `_UICreateScreenUIImage`. Revisa los logs de SpringBoard:
+The iPhone's capture backend is silently failing. The tweak auto-falls back to `_UICreateScreenUIImage` after 30 black frames from `CARenderServer`. Inspect the tweak log:
 
 ```sh
-ssh mobile@<IP> 'tail -n 200 /var/log/syslog | grep SMIR'
+ssh mobile@<ip> 'tail -n 200 /tmp/screenmirror.log'
 ```
 
-Si aparece `Jetsam` justo antes, posiblemente sea fuga de memoria — usa el preset **Low** desde la app del Mac (⌘1).
+If you see Jetsam events shortly before, drop to the Low preset (⌘1) — the fallback path retains a CGImage briefly and high resolutions can OOM in SpringBoard.
 
-### El listener Mac dice `READY` pero `lsof :4878` no muestra nada
+### Mac listener says `READY` but `lsof :4878` shows nothing
 
-`lsof` filtra agresivamente. Usa `netstat -an -p tcp | grep 4878` o conecta con `nc 127.0.0.1 4878` para confirmar.
+`lsof` filters aggressively for the current user. Use `netstat -an -p tcp | grep 4878` instead, or `nc 127.0.0.1 4878` to confirm the listener is reachable. (Both will succeed; the empty `lsof` is cosmetic.)
 
-### `Local Network` denegado por macOS
+### Local Network privacy denied (macOS Sonoma+)
 
-macOS Sonoma+ pide permiso explícito para descubrimiento Bonjour la primera vez que la app abre un listener. Si no salió el diálogo, fuerza la concesión:
+macOS asks the first time the app opens a listener. If the prompt was dismissed, force a re-prompt:
 
 ```sh
 tccutil reset NSLocalNetworkUsageDescription com.example.ScreenMirrorServer
 ```
 
-Y reabre la app — debería aparecer el prompt.
+Reopen the app and accept.
 
-## Seguridad
+### SpringBoard crash loop on iOS 18
 
-- **Forward secrecy**: cada sesión genera un par X25519 efímero; el secreto compartido se borra inmediatamente después de derivar la clave AES, así que comprometer el password después no permite descifrar capturas anteriores.
-- **Autenticación mutua**: ambos lados derivan la misma clave AES-256 sólo si conocen el mismo password. Un atacante en LAN sin password no puede descifrar el stream ni inyectar mensajes (las MAC GCM lo evitan).
-- **El password debe ser ≥ 8 caracteres** y nunca debería ser reutilizado fuera de este uso. PBKDF2-SHA512 con 600 000 iteraciones (recomendación OWASP 2023) hace inviable un brute-force offline en hardware típico.
-- **TCP en claro a vista de Wireshark**: el wire format es opaco — sólo se ve un HELLO de longitud fija + bloques cifrados con tag GCM de 16 bytes.
+Crashes with `EXC_CRASH/SIGKILL` in `mach_msg2_trap` from `-[FAFetchFamilyCircleRequest fetchFamilyCircleWithError:]` are an iOS 18 SpringBoard issue (iCloud Family Sharing main-thread deadlock) and **not** caused by this tweak. To recover, disable the dylib over SSH:
 
-## Licencia
+```sh
+ssh mobile@<ip> "sudo mv \
+  /var/jb/Library/MobileSubstrate/DynamicLibraries/ScreenMirror.dylib \
+  /var/jb/Library/MobileSubstrate/DynamicLibraries/ScreenMirror.dylib.disabled \
+  && sudo killall -9 SpringBoard"
+```
 
-MIT — ver [`LICENSE`](LICENSE) (añade el archivo si aún no existe).
+After SpringBoard stabilises (the family-sharing daemon usually recovers), rename the dylib back:
 
-## Reconocimientos
+```sh
+ssh mobile@<ip> "sudo mv \
+  /var/jb/Library/MobileSubstrate/DynamicLibraries/ScreenMirror.dylib.disabled \
+  /var/jb/Library/MobileSubstrate/DynamicLibraries/ScreenMirror.dylib \
+  && sudo killall -9 SpringBoard"
+```
 
-- [Theos](https://theos.dev/) por el toolchain de tweaks.
-- [TweetNaCl](https://tweetnacl.cr.yp.to/) — base de la implementación X25519 en C.
-- Veency / Activator por el patrón de inyección HID con `Hand transducer`.
+## Security
+
+- **Forward secrecy**: every connection generates a fresh X25519 keypair; the private half is wiped immediately after deriving the AES key. Compromising the password later does not let an attacker decrypt earlier captures.
+- **Mutual authentication**: both sides arrive at the same 256-bit AES key only if they both know the password. The GCM authentication tag prevents an active attacker without the password from injecting or modifying messages — the receiving side rejects every tampered frame.
+- **Password rules**: ≥ 8 characters; do not reuse outside this tool. PBKDF2-SHA512 with 600 000 iterations makes offline brute-force expensive on commodity hardware (about 1.6 GPU-seconds per attempt on an A100 today, per OWASP 2023 guidance).
+- **What's visible on the wire**: the only fixed-length plaintext is the 56-byte HELLO at the start of each connection (magic + version + flags + nonce + ephemeral X25519 pubkey). Everything after is `length-prefix ‖ AES-GCM ciphertext ‖ 16-byte tag`. A passive observer learns connection timing, framing, and approximate frame size — not content.
+- **Replay protection**: monotonic counter IVs (per direction). Reusing a session key with a stale counter would leak GCM keystream — we never decrement counters and never reuse the session key across reconnects.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
+
+## Tested Devices
+
+- Iphone8 (iOS 16.x) - Jailbroken with Palera1n
+- Ipad 7th (iOS 18.x) - Jailbroken with Palera1n   
+
+## Acknowledgements
+
+- [Theos](https://theos.dev/) for the tweak toolchain.
+- [TweetNaCl](https://tweetnacl.cr.yp.to/) — basis of the X25519 scalarmult implementation.
+- Veency / Activator for the IOHID `Hand transducer` injection pattern.
