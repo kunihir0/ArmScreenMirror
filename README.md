@@ -88,7 +88,7 @@ The wire format is documented in [`PROTOCOL.md`](PROTOCOL.md).
 ### 1. Clone
 
 ```sh
-git clone https://github.com/<your-user>/ipa-remote.git
+git clone https://github.com/e1abrador/ipa-remote.git
 cd ipa-remote
 ```
 
