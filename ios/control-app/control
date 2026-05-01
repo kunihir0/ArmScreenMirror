@@ -1,0 +1,9 @@
+Package: com.example.screenmirror-control
+Name: ScreenMirror Control
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: UI para gestionar la conexión del tweak ScreenMirror desde el iPhone.
+Maintainer: ipa-remote
+Author: ipa-remote
+Section: Utilities
+Depends: firmware (>= 11.0), com.example.screenmirror

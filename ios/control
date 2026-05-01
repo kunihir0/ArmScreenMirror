@@ -1,0 +1,9 @@
+Package: com.example.screenmirror
+Name: ScreenMirror
+Version: 0.2.0
+Architecture: iphoneos-arm64
+Description: Tweak en SpringBoard que hace screen mirroring + control remoto via TCP.
+Maintainer: ipa-remote
+Author: ipa-remote
+Section: Tweaks
+Depends: firmware (>= 11.0), mobilesubstrate | preferenceloader | ellekit
