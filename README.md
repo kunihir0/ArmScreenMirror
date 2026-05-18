@@ -338,7 +338,8 @@ MIT — see [`LICENSE`](LICENSE).
 ## Tested Devices
 
 - Iphone8 (iOS 16.x) - Jailbroken with Palera1n
-- Ipad 7th (iOS 18.x) - Jailbroken with Palera1n   
+- Ipad 7th (iOS 18.x) - Jailbroken with Palera1n
+- Iphone X (iOS 16.x) - Jailbroken with Palera1n
 
 ## Acknowledgements
 
