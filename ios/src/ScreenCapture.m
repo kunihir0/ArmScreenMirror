@@ -18,8 +18,9 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
 @implementation ScreenCapture {
     dispatch_source_t _timer;
     dispatch_queue_t  _queue;
+    CGSize            _nativeDisplaySize;
+    CGSize            _displaySize;
     IOSurfaceRef      _surface;
-    CVPixelBufferRef  _wrappedPB;
     CFAbsoluteTime    _startTime;
     RenderDisplayFn   _fnRenderDisplay;
     UICreateImgFn     _fnUICreateScreen;
@@ -40,9 +41,20 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
     double            _intervalCaptureTimeSum;
     NSUInteger        _intervalCaptureCount;
     double            _intervalMaxCaptureTimeMs;
+    double            _carTimeSum;
+    NSUInteger        _carTimeCount;
+    double            _carMaxMs;
+    double            _scaleTimeSum;
+    NSUInteger        _scaleTimeCount;
+    double            _scaleMaxMs;
     size_t            _poolW;
     size_t            _poolH;
 }
+
+@synthesize displaySize = _displaySize;
+@synthesize nativeDisplaySize = _nativeDisplaySize;
+@synthesize displayScale = _displayScale;
+@synthesize pointSize = _pointSize;
 
 - (double)avgCaptureTimeMs {
     return _intervalCaptureCount > 0 ? (_intervalCaptureTimeSum / _intervalCaptureCount) : 0.0;
@@ -52,10 +64,32 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
     return _intervalMaxCaptureTimeMs;
 }
 
+- (double)carAvgMs {
+    return _carTimeCount > 0 ? (_carTimeSum / _carTimeCount) : 0.0;
+}
+
+- (double)carMaxMs {
+    return _carMaxMs;
+}
+
+- (double)scaleAvgMs {
+    return _scaleTimeCount > 0 ? (_scaleTimeSum / _scaleTimeCount) : 0.0;
+}
+
+- (double)scaleMaxMs {
+    return _scaleMaxMs;
+}
+
 - (void)resetIntervalTiming {
     _intervalCaptureTimeSum = 0;
     _intervalCaptureCount = 0;
     _intervalMaxCaptureTimeMs = 0;
+    _carTimeSum = 0;
+    _carTimeCount = 0;
+    _carMaxMs = 0;
+    _scaleTimeSum = 0;
+    _scaleTimeCount = 0;
+    _scaleMaxMs = 0;
 }
 
 - (instancetype)init {
@@ -76,11 +110,12 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
 }
 
 - (void)_recomputeDisplaySize {
-    // captureScale opera sobre la resolución NATIVA en píxeles. Equivalente
-    // a multiplicar pointSize × displayScale × captureScale.
+    _nativeDisplaySize = CGSizeMake(round(_pointSize.width * _displayScale),
+                                    round(_pointSize.height * _displayScale));
     CGFloat factor = MAX(0.1, _captureScale) * _displayScale;
-    _displaySize = CGSizeMake(round(_pointSize.width  * factor),
-                              round(_pointSize.height * factor));
+    size_t w = ((size_t)round(_pointSize.width  * factor)) & ~((size_t)1);
+    size_t h = ((size_t)round(_pointSize.height * factor)) & ~((size_t)1);
+    _displaySize = CGSizeMake(w, h);
 }
 
 - (void)setFps:(NSInteger)fps {
@@ -102,9 +137,8 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
 
 - (void)dealloc {
     [self stop];
-    if (_wrappedPB) CVPixelBufferRelease(_wrappedPB);
-    if (_surface)   CFRelease(_surface);
-    if (_pool)      CFRelease(_pool);
+    if (_surface) CFRelease(_surface);
+    if (_pool)    CFRelease(_pool);
 }
 
 - (NSString *)backendName {
@@ -113,8 +147,8 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
 
 - (BOOL)_alloc {
     if (_surface) return YES;
-    size_t w = (size_t)_displaySize.width;
-    size_t h = (size_t)_displaySize.height;
+    size_t w = (size_t)_nativeDisplaySize.width;
+    size_t h = (size_t)_nativeDisplaySize.height;
     size_t bpe = 4;
     size_t bpr = ((w * bpe) + 63) & ~((size_t)63);
     NSDictionary *props = @{
@@ -130,15 +164,60 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
         _lastError = @"IOSurfaceCreate falló";
         return NO;
     }
-    NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
-    CVReturn r = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, _surface,
-                                                  (__bridge CFDictionaryRef)attrs, &_wrappedPB);
-    if (r != kCVReturnSuccess || !_wrappedPB) {
-        _lastError = [NSString stringWithFormat:@"CVPB wrap r=%d", r];
-        return NO;
-    }
-    NSLog(@"[ScreenCapture] surface=%p pb=%p (%zux%zu, %zu bpr)", _surface, _wrappedPB, w, h, bpr);
+    NSLog(@"[ScreenCapture] native surface=%p (%zux%zu, %zu bpr) -> stream target=%.0fx%.0f",
+          _surface, w, h, bpr, _displaySize.width, _displaySize.height);
     return YES;
+}
+
+- (CVPixelBufferRef)_scaleSourceBuffer:(const vImage_Buffer *)srcBuf {
+    if (!srcBuf || !srcBuf->data) return NULL;
+
+    size_t targetW = (size_t)_displaySize.width;
+    size_t targetH = (size_t)_displaySize.height;
+    if (!_pool || _poolW != targetW || _poolH != targetH) {
+        if (_pool) { CFRelease(_pool); _pool = NULL; }
+        _poolW = targetW;
+        _poolH = targetH;
+        NSDictionary *pa = @{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferWidthKey:           @(targetW),
+            (id)kCVPixelBufferHeightKey:          @(targetH),
+            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        };
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
+                                (__bridge CFDictionaryRef)pa, &_pool);
+    }
+
+    CVPixelBufferRef outPB = NULL;
+    if (_pool) {
+        CVReturn r = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &outPB);
+        if (r != kCVReturnSuccess || !outPB) return NULL;
+    } else {
+        return NULL;
+    }
+
+    CVReturn lockRet = CVPixelBufferLockBaseAddress(outPB, 0);
+    if (lockRet != kCVReturnSuccess) {
+        CVPixelBufferRelease(outPB);
+        return NULL;
+    }
+    void *dstData = CVPixelBufferGetBaseAddress(outPB);
+    if (!dstData) {
+        CVPixelBufferUnlockBaseAddress(outPB, 0);
+        CVPixelBufferRelease(outPB);
+        return NULL;
+    }
+
+    vImage_Buffer dstBuf = {
+        .data = dstData,
+        .height = (vImagePixelCount)targetH,
+        .width = (vImagePixelCount)targetW,
+        .rowBytes = CVPixelBufferGetBytesPerRow(outPB)
+    };
+
+    vImageScale_ARGB8888(srcBuf, &dstBuf, NULL, kvImageDoNotTile);
+    CVPixelBufferUnlockBaseAddress(outPB, 0);
+    return outPB;
 }
 
 - (BOOL)start {
@@ -232,15 +311,42 @@ static BOOL bytes_unchanged(const void *base, size_t bpr, size_t w, size_t h,
     CFAbsoluteTime tickStart = CFAbsoluteTimeGetCurrent();
 
     if (_backend == BackendCAR) {
+        CFAbsoluteTime tCar0 = CFAbsoluteTimeGetCurrent();
         kern_return_t kr = _fnRenderDisplay(0, CFSTR("LCD"), _surface, 0, 0);
         if (kr != KERN_SUCCESS) {
             kr = _fnRenderDisplay(0, NULL, _surface, 0, 0);
         }
+        CFAbsoluteTime tCar1 = CFAbsoluteTimeGetCurrent();
+        double carMs = (tCar1 - tCar0) * 1000.0;
+        _carTimeSum += carMs;
+        _carTimeCount++;
+        if (carMs > _carMaxMs) _carMaxMs = carMs;
+
         if (kr == KERN_SUCCESS) {
             _carFailCount = 0;
-            _framesCaptured++;
-            uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
-            [self.delegate screenCapture:self didCaptureBuffer:_wrappedPB pts:ptsUs];
+            IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+            vImage_Buffer srcBuf = {
+                .data = IOSurfaceGetBaseAddress(_surface),
+                .height = (vImagePixelCount)_nativeDisplaySize.height,
+                .width = (vImagePixelCount)_nativeDisplaySize.width,
+                .rowBytes = IOSurfaceGetBytesPerRow(_surface)
+            };
+            CFAbsoluteTime tScale0 = CFAbsoluteTimeGetCurrent();
+            CVPixelBufferRef outPB = [self _scaleSourceBuffer:&srcBuf];
+            CFAbsoluteTime tScale1 = CFAbsoluteTimeGetCurrent();
+            IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
+
+            double scaleMs = (tScale1 - tScale0) * 1000.0;
+            _scaleTimeSum += scaleMs;
+            _scaleTimeCount++;
+            if (scaleMs > _scaleMaxMs) _scaleMaxMs = scaleMs;
+
+            if (outPB) {
+                _framesCaptured++;
+                uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
+                [self.delegate screenCapture:self didCaptureBuffer:outPB pts:ptsUs];
+                CVPixelBufferRelease(outPB);
+            }
         } else {
             _carFailCount++;
             _lastError = [NSString stringWithFormat:@"CARenderDisplay kr=%d", kr];
@@ -262,90 +368,94 @@ static BOOL bytes_unchanged(const void *base, size_t bpr, size_t w, size_t h,
                 NSLog(@"[ScreenCapture] CARenderDisplay probe succeeded, recovering BackendCAR");
                 _backend = BackendCAR;
                 _carFailCount = 0;
-                _framesCaptured++;
-                uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
-                [self.delegate screenCapture:self didCaptureBuffer:_wrappedPB pts:ptsUs];
+                IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+                vImage_Buffer srcBuf = {
+                    .data = IOSurfaceGetBaseAddress(_surface),
+                    .height = (vImagePixelCount)_nativeDisplaySize.height,
+                    .width = (vImagePixelCount)_nativeDisplaySize.width,
+                    .rowBytes = IOSurfaceGetBytesPerRow(_surface)
+                };
+                CFAbsoluteTime tScale0 = CFAbsoluteTimeGetCurrent();
+                CVPixelBufferRef outPB = [self _scaleSourceBuffer:&srcBuf];
+                CFAbsoluteTime tScale1 = CFAbsoluteTimeGetCurrent();
+                IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
+
+                double scaleMs = (tScale1 - tScale0) * 1000.0;
+                _scaleTimeSum += scaleMs;
+                _scaleTimeCount++;
+                if (scaleMs > _scaleMaxMs) _scaleMaxMs = scaleMs;
+
+                if (outPB) {
+                    _framesCaptured++;
+                    uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
+                    [self.delegate screenCapture:self didCaptureBuffer:outPB pts:ptsUs];
+                    CVPixelBufferRelease(outPB);
+                }
+                double elapsedMs = (CFAbsoluteTimeGetCurrent() - tickStart) * 1000.0;
+                _intervalCaptureTimeSum += elapsedMs;
+                _intervalCaptureCount++;
+                if (elapsedMs > _intervalMaxCaptureTimeMs) _intervalMaxCaptureTimeMs = elapsedMs;
                 _busy = NO;
                 return;
             }
         }
+
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         UIImage *ui = (__bridge_transfer UIImage *)_fnUICreateScreen();
         CFAbsoluteTime t1 = CFAbsoluteTimeGetCurrent();
         if (ui && ui.CGImage) {
             CGImageRef img = ui.CGImage;
-            size_t targetW = (size_t)_displaySize.width;
-            size_t targetH = (size_t)_displaySize.height;
-            if (!_pool || _poolW != targetW || _poolH != targetH) {
-                if (_pool) { CFRelease(_pool); _pool = NULL; }
-                _poolW = targetW;
-                _poolH = targetH;
-                NSDictionary *pa = @{
-                    (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-                    (id)kCVPixelBufferWidthKey:           @(targetW),
-                    (id)kCVPixelBufferHeightKey:          @(targetH),
-                    (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-                };
-                CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
-                                        (__bridge CFDictionaryRef)pa, &_pool);
+            static CGImageGetIOSurfaceFn fnGetSurface = NULL;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                fnGetSurface = (CGImageGetIOSurfaceFn)dlsym(RTLD_DEFAULT, "CGImageGetIOSurface");
+            });
+            IOSurfaceRef surf = fnGetSurface ? fnGetSurface(img) : NULL;
+            void *srcData = NULL;
+            CFDataRef rawData = NULL;
+            size_t srcRowBytes = 0;
+            if (surf) {
+                IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
+                srcData = IOSurfaceGetBaseAddress(surf);
+                srcRowBytes = IOSurfaceGetBytesPerRow(surf);
+            } else {
+                CGDataProviderRef dp = CGImageGetDataProvider(img);
+                rawData = dp ? CGDataProviderCopyData(dp) : NULL;
+                srcData = rawData ? (void *)CFDataGetBytePtr(rawData) : NULL;
+                srcRowBytes = CGImageGetBytesPerRow(img);
             }
-            CVPixelBufferRef pb = NULL;
-            if (_pool) CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &pb);
-            if (pb) {
-                CVPixelBufferLockBaseAddress(pb, 0);
-                static CGImageGetIOSurfaceFn fnGetSurface = NULL;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    fnGetSurface = (CGImageGetIOSurfaceFn)dlsym(RTLD_DEFAULT, "CGImageGetIOSurface");
-                });
-                IOSurfaceRef surf = fnGetSurface ? fnGetSurface(img) : NULL;
-                void *srcData = NULL;
-                CFDataRef rawData = NULL;
-                size_t srcRowBytes = 0;
-                if (surf) {
-                    IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
-                    srcData = IOSurfaceGetBaseAddress(surf);
-                    srcRowBytes = IOSurfaceGetBytesPerRow(surf);
-                } else {
-                    CGDataProviderRef dp = CGImageGetDataProvider(img);
-                    rawData = dp ? CGDataProviderCopyData(dp) : NULL;
-                    srcData = rawData ? (void *)CFDataGetBytePtr(rawData) : NULL;
-                    srcRowBytes = CGImageGetBytesPerRow(img);
-                }
 
-                if (srcData) {
-                    vImage_Buffer srcBuf = {
-                        .data = srcData,
-                        .height = (vImagePixelCount)CGImageGetHeight(img),
-                        .width = (vImagePixelCount)CGImageGetWidth(img),
-                        .rowBytes = srcRowBytes
-                    };
-                    vImage_Buffer dstBuf = {
-                        .data = CVPixelBufferGetBaseAddress(pb),
-                        .height = (vImagePixelCount)targetH,
-                        .width = (vImagePixelCount)targetW,
-                        .rowBytes = CVPixelBufferGetBytesPerRow(pb)
-                    };
-                    vImageScale_ARGB8888(&srcBuf, &dstBuf, NULL, kvImageDoNotTile);
-                }
+            if (srcData) {
+                vImage_Buffer srcBuf = {
+                    .data = srcData,
+                    .height = (vImagePixelCount)CGImageGetHeight(img),
+                    .width = (vImagePixelCount)CGImageGetWidth(img),
+                    .rowBytes = srcRowBytes
+                };
+                CFAbsoluteTime tScale0 = CFAbsoluteTimeGetCurrent();
+                CVPixelBufferRef outPB = [self _scaleSourceBuffer:&srcBuf];
+                CFAbsoluteTime tScale1 = CFAbsoluteTimeGetCurrent();
+                double scaleMs = (tScale1 - tScale0) * 1000.0;
+                _scaleTimeSum += scaleMs;
+                _scaleTimeCount++;
+                if (scaleMs > _scaleMaxMs) _scaleMaxMs = scaleMs;
 
                 if (surf) {
                     IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
                 } else if (rawData) {
                     CFRelease(rawData);
                 }
-                CVPixelBufferUnlockBaseAddress(pb, 0);
-                CFAbsoluteTime t2 = CFAbsoluteTimeGetCurrent();
-                _framesCaptured++;
-                uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
-                [self.delegate screenCapture:self didCaptureBuffer:pb pts:ptsUs];
-                CFAbsoluteTime t3 = CFAbsoluteTimeGetCurrent();
-                CVPixelBufferRelease(pb);
+                if (outPB) {
+                    _framesCaptured++;
+                    uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
+                    [self.delegate screenCapture:self didCaptureBuffer:outPB pts:ptsUs];
+                    CVPixelBufferRelease(outPB);
+                }
 
                 static int uiprivCount = 0;
                 if (++uiprivCount % 30 == 1) {
-                    NSLog(@"[UIPRIV Timing] snap=%.2fms draw=%.2fms enc+tx=%.2fms total=%.2fms",
-                          (t1 - t0) * 1000.0, (t2 - t1) * 1000.0, (t3 - t2) * 1000.0, (t3 - t0) * 1000.0);
+                    NSLog(@"[UIPRIV Timing] snap=%.2fms scale=%.2fms total=%.2fms",
+                          (t1 - t0) * 1000.0, scaleMs, (tScale1 - t0) * 1000.0);
                 }
             }
         } else {

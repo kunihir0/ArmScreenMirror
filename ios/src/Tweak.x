@@ -119,11 +119,13 @@
 
     double avgCapMs = _cap.avgCaptureTimeMs;
     double maxCapMs = _cap.maxCaptureTimeMs;
+    double carAvgMs = _cap.carAvgMs;
+    double scaleAvgMs = _cap.scaleAvgMs;
     [_cap resetIntervalTiming];
 
-    NSLog(@"[SMIR Telemetry] backend=%@ reqFps=%ld capFps=%lu encFps=%lu skipped=0 capAvg=%.2fms capMax=%.2fms txKbps=%lu queueBytes=%lu droppedFrames=%lu",
+    NSLog(@"[SMIR Telemetry] backend=%@ reqFps=%ld capFps=%lu encFps=%lu skipped=0 capAvg=%.2fms capMax=%.2fms carAvg=%.2fms scaleAvg=%.2fms txKbps=%lu queueBytes=%lu droppedFrames=%lu",
           _cap.backendName, (long)_cap.fps, (unsigned long)capFps, (unsigned long)encFps,
-          avgCapMs, maxCapMs, (unsigned long)(txBytes * 8 / 1000), (unsigned long)_net.writeQueueBytes, (unsigned long)dropped);
+          avgCapMs, maxCapMs, carAvgMs, scaleAvgMs, (unsigned long)(txBytes * 8 / 1000), (unsigned long)_net.writeQueueBytes, (unsigned long)dropped);
 }
 
 - (void)_reloadAndApply {

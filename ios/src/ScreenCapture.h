@@ -11,7 +11,8 @@
 @interface ScreenCapture : NSObject
 
 @property (nonatomic, weak) id<ScreenCaptureDelegate> delegate;
-@property (nonatomic, readonly) CGSize displaySize;        // píxeles capturados (tras escala)
+@property (nonatomic, readonly) CGSize displaySize;        // píxeles destino codificador (tras escala)
+@property (nonatomic, readonly) CGSize nativeDisplaySize;  // resolución nativa física (ej. 1284x2778)
 @property (nonatomic, readonly) CGFloat displayScale;      // 2.0/3.0 (pantalla nativa)
 @property (nonatomic, readonly) CGSize pointSize;          // tamaño lógico iPhone
 @property (nonatomic, assign)   NSInteger fps;             // fps activo
@@ -24,6 +25,10 @@
 @property (nonatomic, readonly) NSString  *lastError;
 @property (nonatomic, readonly) double     avgCaptureTimeMs;
 @property (nonatomic, readonly) double     maxCaptureTimeMs;
+@property (nonatomic, readonly) double     carAvgMs;
+@property (nonatomic, readonly) double     carMaxMs;
+@property (nonatomic, readonly) double     scaleAvgMs;
+@property (nonatomic, readonly) double     scaleMaxMs;
 
 - (BOOL)start;
 - (void)stop;
