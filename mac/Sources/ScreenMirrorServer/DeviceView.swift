@@ -36,7 +36,6 @@ final class DeviceView: NSView {
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = NSColor.black.cgColor
         displayLayer.frame = bounds
-        displayLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         root.addSublayer(displayLayer)
     }
 
@@ -73,10 +72,19 @@ final class DeviceView: NSView {
         trackingArea = t
     }
 
+    private var droppedDisplayFrames: UInt64 = 0
+
     func enqueue(_ sb: CMSampleBuffer) {
         if displayLayer.status == .failed {
             NSLog("[DeviceView] layer failed, flush err=%@", String(describing: displayLayer.error))
             displayLayer.flush()
+        }
+        guard displayLayer.isReadyForMoreMediaData else {
+            droppedDisplayFrames += 1
+            if droppedDisplayFrames == 1 || droppedDisplayFrames % 60 == 0 {
+                NSLog("[DeviceView] display queue backpressured, dropped stale presentation frame (total=%llu)", droppedDisplayFrames)
+            }
+            return
         }
         displayLayer.enqueue(sb)
     }
@@ -134,10 +142,10 @@ final class DeviceView: NSView {
         let dxPts = dxNorm * devicePointSize.width
         let dyPts = dyNorm * devicePointSize.height
         let dist = sqrt(dxPts * dxPts + dyPts * dyPts)
+        guard dist > 0.001 else { return }
         // Pasos: 1 cada `interpolationStep` puntos, mínimo 1, máximo 16
         // (más de 16 saturaría TCP innecesariamente).
         let steps = max(1, min(16, Int(ceil(dist / interpolationStep))))
-        guard steps > 0 else { return }
         for i in 1...steps {
             let t = CGFloat(i) / CGFloat(steps)
             let p = CGPoint(x: from.x + dxNorm * t, y: from.y + dyNorm * t)

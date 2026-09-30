@@ -42,7 +42,7 @@ final class VideoDecoder {
         self.formatDesc = formatDesc
     }
 
-    /// Procesa un frame en Annex-B. Detecta SPS/PPS embebidos por si llegan inline.
+    /// Zero-copy Annex-B scanning. Detecta SPS/PPS embebidos por si llegan inline.
     func decodeAnnexB(_ data: Data, pts: UInt64) {
         var spsBuf: Data?, ppsBuf: Data?
         var pictureNALUs: [Data] = []
@@ -103,17 +103,17 @@ final class VideoDecoder {
 
         var blockBuffer: CMBlockBuffer?
         let avccLen = avcc.count
-        let dataPtr = UnsafeMutableRawPointer.allocate(byteCount: avccLen, alignment: 1)
+        guard let dataPtr = malloc(avccLen) else { return }
         avcc.copyBytes(to: dataPtr.assumingMemoryBound(to: UInt8.self), count: avccLen)
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: dataPtr, blockLength: avccLen,
-            blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+            blockAllocator: kCFAllocatorMalloc, customBlockSource: nil,
             offsetToData: 0, dataLength: avccLen,
             flags: 0, blockBufferOut: &blockBuffer)
         guard status == noErr, let bb = blockBuffer else {
             NSLog("[VideoDecoder] CMBlockBufferCreate err=%d", status)
-            dataPtr.deallocate()
+            free(dataPtr)
             return
         }
 

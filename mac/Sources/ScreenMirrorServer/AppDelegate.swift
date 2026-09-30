@@ -80,6 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker?.close()
         picker = nil
         let c = MainWindowController(targetDevice: descriptor)
+        c.onWindowWillClose = { [weak self] closedCtrl in
+            guard let self = self else { return }
+            let target = closedCtrl
+            self.controllers.removeAll { $0 === target }
+            if self.controller === target {
+                self.controller = self.controllers.last
+            }
+        }
         c.showWindow(nil)
         c.window?.makeKeyAndOrderFront(nil)
         controller = c                  // most recent — used by menu shortcuts
@@ -107,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setQualityMedium() { controller?.applyQuality(.medium) }
     @objc private func setQualityHigh()   { controller?.applyQuality(.high) }
 
+    @objc private func viewFitToScreen() { controller?.autoFitWindow(toScreenFraction: 0.68) }
+    @objc private func viewScale100()    { controller?.applyScaleFactor(1.0) }
+    @objc private func viewScale75()     { controller?.applyScaleFactor(0.75) }
+    @objc private func viewScale67()     { controller?.applyScaleFactor(0.67) }
+    @objc private func viewScale50()     { controller?.applyScaleFactor(0.50) }
     private func installMenu() {
         let menubar = NSMenu()
 
@@ -142,6 +155,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         editItem.submenu = editMenu
 
+
+        // View menu
+        let viewItem = NSMenuItem()
+        menubar.addItem(viewItem)
+        let viewMenu = NSMenu(title: "View")
+        let fitItem = NSMenuItem(title: "Fit to Screen", action: #selector(viewFitToScreen), keyEquivalent: "0")
+        fitItem.keyEquivalentModifierMask = .command
+        viewMenu.addItem(fitItem)
+        viewMenu.addItem(NSMenuItem.separator())
+        viewMenu.addItem(NSMenuItem(title: "Actual Size (100%)", action: #selector(viewScale100), keyEquivalent: ""))
+        viewMenu.addItem(NSMenuItem(title: "75%",                action: #selector(viewScale75),  keyEquivalent: ""))
+        viewMenu.addItem(NSMenuItem(title: "67%",                action: #selector(viewScale67),  keyEquivalent: ""))
+        viewMenu.addItem(NSMenuItem(title: "50%",                action: #selector(viewScale50),  keyEquivalent: ""))
+        viewItem.submenu = viewMenu
         NSApp.mainMenu = menubar
     }
 }

@@ -1,13 +1,13 @@
 #import "VideoEncoder.h"
 #import <VideoToolbox/VideoToolbox.h>
+#import <stdatomic.h>
 
 @implementation VideoEncoder {
     VTCompressionSessionRef _session;
     int _w, _h;
     BOOL _sentConfig;
-    BOOL _forceKey;
+    atomic_bool _forceKey;
 }
-
 - (instancetype)init {
     if ((self = [super init])) {
         _bitrate = 1500 * 1000;
@@ -19,6 +19,13 @@
 }
 
 - (void)dealloc { [self stop]; }
+
+static void SetVTProperty(VTCompressionSessionRef session, CFStringRef key, CFTypeRef val, const char *name) {
+    OSStatus err = VTSessionSetProperty(session, key, val);
+    if (err != noErr) {
+        NSLog(@"[VideoEncoder] failed to set property %s: status=%d", name, (int)err);
+    }
+}
 
 static void EncoderCallback(void *outputCallbackRefCon,
                             void *sourceFrameRefCon,
@@ -57,35 +64,35 @@ static void EncoderCallback(void *outputCallbackRefCon,
         return NO;
     }
 
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel);
+    SetVTProperty(_session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, "RealTime");
+    SetVTProperty(_session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering");
+    SetVTProperty(_session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel, "ProfileLevel");
 
     // Quality-mode (0..1) configurable por preset.
     float quality = _quality;
     CFNumberRef ql = CFNumberCreate(NULL, kCFNumberFloatType, &quality);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_Quality, ql);
+    SetVTProperty(_session, kVTCompressionPropertyKey_Quality, ql, "Quality");
     CFRelease(ql);
 
     int bitrate = (int)_bitrate;
     CFNumberRef br = CFNumberCreate(NULL, kCFNumberIntType, &bitrate);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_AverageBitRate, br);
+    SetVTProperty(_session, kVTCompressionPropertyKey_AverageBitRate, br, "AverageBitRate");
     CFRelease(br);
 
     int kfi = (int)_keyframeInterval;
     CFNumberRef kn = CFNumberCreate(NULL, kCFNumberIntType, &kfi);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_MaxKeyFrameInterval, kn);
+    SetVTProperty(_session, kVTCompressionPropertyKey_MaxKeyFrameInterval, kn, "MaxKeyFrameInterval");
     CFRelease(kn);
 
     int fpsVal = (int)_fps;
     CFNumberRef fr = CFNumberCreate(NULL, kCFNumberIntType, &fpsVal);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_ExpectedFrameRate, fr);
+    SetVTProperty(_session, kVTCompressionPropertyKey_ExpectedFrameRate, fr, "ExpectedFrameRate");
     CFRelease(fr);
 
     // Latencia mínima: 0 frames de delay.
     int maxFrameDelay = 0;
     CFNumberRef md = CFNumberCreate(NULL, kCFNumberIntType, &maxFrameDelay);
-    VTSessionSetProperty(_session, kVTCompressionPropertyKey_MaxFrameDelayCount, md);
+    SetVTProperty(_session, kVTCompressionPropertyKey_MaxFrameDelayCount, md, "MaxFrameDelayCount");
     CFRelease(md);
 
     VTCompressionSessionPrepareToEncodeFrames(_session);
@@ -100,7 +107,9 @@ static void EncoderCallback(void *outputCallbackRefCon,
     }
 }
 
-- (void)forceKeyframe { _forceKey = YES; }
+- (void)forceKeyframe {
+    atomic_store_explicit(&_forceKey, true, memory_order_release);
+}
 
 - (void)encodePixelBuffer:(CVPixelBufferRef)pb pts:(uint64_t)ptsUs {
     if (!_session || !pb) {
@@ -112,9 +121,8 @@ static void EncoderCallback(void *outputCallbackRefCon,
     int32_t fpsVal = (int32_t)(_fps > 0 ? _fps : 30);
     CMTime dur = CMTimeMake(1, fpsVal);
     NSDictionary *frameProps = nil;
-    if (_forceKey) {
+    if (atomic_exchange_explicit(&_forceKey, false, memory_order_acq_rel)) {
         frameProps = @{ (id)kVTEncodeFrameOptionKey_ForceKeyFrame: @YES };
-        _forceKey = NO;
     }
     OSStatus r = VTCompressionSessionEncodeFrame(_session, pb, pts, dur,
         (__bridge CFDictionaryRef)frameProps, NULL, NULL);

@@ -32,7 +32,9 @@ final class MainWindowController: NSWindowController, VideoDecoderDelegate, Devi
     let targetDevice: DeviceDescriptor?
 
     static weak var shared: MainWindowController?
-
+    var onWindowWillClose: ((MainWindowController) -> Void)?
+    private var didInitialAutoFit = false
+    private var lastOrientationIsLandscape: Bool?
     init(targetDevice: DeviceDescriptor? = nil) {
         self.targetDevice = targetDevice
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -44,6 +46,8 @@ final class MainWindowController: NSWindowController, VideoDecoderDelegate, Devi
         super.init(window: win)
         MainWindowController.shared = self
         win.delegate = self
+        let autosaveName = NSWindow.FrameAutosaveName("ScreenMirror_\(targetDevice?.modelId ?? "Default")")
+        win.setFrameAutosaveName(autosaveName)
         router.register(self)
 
         let content = NSView(frame: win.contentView!.bounds)
@@ -213,6 +217,10 @@ final class MainWindowController: NSWindowController, VideoDecoderDelegate, Devi
 
     func windowWillClose(_ notification: Notification) {
         router.unregister(self)
+        forwarder.setClient(nil)
+        currentClient?.cancel()
+        currentClient = nil
+        onWindowWillClose?(self)
     }
 
     var hasActiveClient: Bool { currentClient != nil }
@@ -504,13 +512,26 @@ final class MainWindowController: NSWindowController, VideoDecoderDelegate, Devi
             guard let hs = SMIRHandshake.decode(payload) else { return }
             let descriptor = DeviceDescriptor.make(from: hs)
             self.handshake = hs
-            DispatchQueue.main.async {
-                let pointW = CGFloat(hs.width) / CGFloat(max(hs.scale, 1))
-                let pointH = CGFloat(hs.height) / CGFloat(max(hs.scale, 1))
-                self.deviceView.devicePointSize = CGSize(width: pointW, height: pointH)
-                self.resizeWindowForDevice(pointSize: CGSize(width: pointW, height: pointH))
-                self.window?.title = "ScreenMirror — \(descriptor.displayName)"
-                self.setStatus("Connected: \(hs.deviceName) \(Int(hs.width))×\(Int(hs.height))@\(hs.scale)x")
+            let pointW = CGFloat(hs.width) / CGFloat(max(hs.scale, 1))
+            let pointH = CGFloat(hs.height) / CGFloat(max(hs.scale, 1))
+            self.deviceView.devicePointSize = CGSize(width: pointW, height: pointH)
+            self.window?.title = "ScreenMirror — \(descriptor.displayName)"
+            self.setStatus("Connected: \(hs.deviceName) \(Int(hs.width))×\(Int(hs.height))@\(hs.scale)x")
+
+            let isLandscape = pointW > pointH
+            if !self.didInitialAutoFit {
+                self.didInitialAutoFit = true
+                self.lastOrientationIsLandscape = isLandscape
+                let autosaveName = NSWindow.FrameAutosaveName("ScreenMirror_\(descriptor.modelId)")
+                self.window?.setFrameAutosaveName(autosaveName)
+                let restored = self.window?.setFrameUsingName(autosaveName) ?? false
+                let visible = (self.window?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+                if !restored || !(self.window?.frame.intersects(visible) ?? false) {
+                    self.autoFitWindow(toScreenFraction: 0.68)
+                }
+            } else if let last = self.lastOrientationIsLandscape, last != isLandscape {
+                self.lastOrientationIsLandscape = isLandscape
+                self.adaptWindowForOrientationChange(pointSize: CGSize(width: pointW, height: pointH))
             }
 
         case .videoConfig:
@@ -586,23 +607,125 @@ final class MainWindowController: NSWindowController, VideoDecoderDelegate, Devi
 
     // MARK: - Window sizing
 
-    private func resizeWindowForDevice(pointSize: CGSize) {
+    private func currentChromeHeight() -> CGFloat {
+        guard let win = window else { return 110 }
+        let titleBar = win.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 100, height: 100)).height - 100
+        let bottomBar: CGFloat = isMinimalist ? 0 : 120
+        return titleBar + bottomBar
+    }
+
+    func autoFitWindow(toScreenFraction fraction: CGFloat = 0.68) {
         guard let win = window else { return }
         guard let screen = win.screen ?? NSScreen.main else { return }
-        let chrome: CGFloat = 110  // navBar(42) + buttonBar(46) + status + margins
+        let pSize = deviceView.devicePointSize
+        guard pSize.width > 0 && pSize.height > 0 else { return }
+
         let avail = screen.visibleFrame
-        let maxH = avail.height * 0.9
-        let maxW = avail.width * 0.7
-        var h = min(maxH, pointSize.height + chrome)
-        var w = (h - chrome) * pointSize.width / pointSize.height
-        if w > maxW {
-            w = maxW
-            h = w * pointSize.height / pointSize.width + chrome
+        let chromeH = currentChromeHeight()
+
+        let maxH = avail.height * fraction
+        let maxW = avail.width * 0.55
+
+        var targetContentH = maxH - chromeH
+        var targetContentW = targetContentH * (pSize.width / pSize.height)
+
+        if targetContentW > maxW {
+            targetContentW = maxW
+            targetContentH = targetContentW * (pSize.height / pSize.width)
         }
-        var frame = win.frame
-        frame.size = NSSize(width: w, height: h)
-        frame.origin.x = max(avail.minX, (avail.width - w) / 2 + avail.minX)
-        frame.origin.y = max(avail.minY, (avail.height - h) / 2 + avail.minY)
-        win.setFrame(frame, display: true, animate: true)
+
+        let finalW = max(targetContentW, win.minSize.width)
+        let finalH = targetContentH + chromeH
+
+        let x = avail.minX + max(0, (avail.width - finalW) / 2)
+        let y = avail.minY + max(0, (avail.height - finalH) / 2)
+        let newFrame = NSRect(x: x, y: y, width: finalW, height: finalH)
+        win.setFrame(newFrame, display: true, animate: true)
     }
+
+    func applyScaleFactor(_ scale: CGFloat) {
+        guard let win = window else { return }
+        guard let screen = win.screen ?? NSScreen.main else { return }
+        let pSize = deviceView.devicePointSize
+        guard pSize.width > 0 && pSize.height > 0 else { return }
+
+        let avail = screen.visibleFrame
+        let chromeH = currentChromeHeight()
+
+        var contentW = pSize.width * scale
+        var contentH = pSize.height * scale
+
+        let maxContentH = avail.height * 0.90 - chromeH
+        let maxContentW = avail.width * 0.90
+        if contentH > maxContentH {
+            contentH = maxContentH
+            contentW = contentH * (pSize.width / pSize.height)
+        }
+        if contentW > maxContentW {
+            contentW = maxContentW
+            contentH = contentW * (pSize.height / pSize.width)
+        }
+
+        let finalW = max(contentW, win.minSize.width)
+        let finalH = contentH + chromeH
+
+        let curCenter = CGPoint(x: win.frame.midX, y: win.frame.midY)
+        var x = curCenter.x - finalW / 2
+        var y = curCenter.y - finalH / 2
+
+        if x < avail.minX { x = avail.minX }
+        if x + finalW > avail.maxX { x = avail.maxX - finalW }
+        if y < avail.minY { y = avail.minY }
+        if y + finalH > avail.maxY { y = avail.maxY - finalH }
+
+        let newFrame = NSRect(x: x, y: y, width: finalW, height: finalH)
+        win.setFrame(newFrame, display: true, animate: true)
+    }
+
+    private func adaptWindowForOrientationChange(pointSize: CGSize) {
+        guard let win = window else { return }
+        guard let screen = win.screen ?? NSScreen.main else { return }
+        let avail = screen.visibleFrame
+        let chromeH = currentChromeHeight()
+
+        let curContentW = win.frame.width
+        let curContentH = max(win.frame.height - chromeH, 50)
+        let approxArea = curContentW * curContentH
+        let aspect = pointSize.width / pointSize.height
+
+        var newContentH = sqrt(approxArea / aspect)
+        var newContentW = newContentH * aspect
+
+        let maxContentH = avail.height * 0.85 - chromeH
+        let maxContentW = avail.width * 0.85
+        if newContentH > maxContentH {
+            newContentH = maxContentH
+            newContentW = newContentH * aspect
+        }
+        if newContentW > maxContentW {
+            newContentW = maxContentW
+            newContentH = newContentW / aspect
+        }
+
+        let finalW = max(newContentW, win.minSize.width)
+        let finalH = newContentH + chromeH
+
+        let curCenter = CGPoint(x: win.frame.midX, y: win.frame.midY)
+        var x = curCenter.x - finalW / 2
+        var y = curCenter.y - finalH / 2
+
+        if x < avail.minX { x = avail.minX }
+        if x + finalW > avail.maxX { x = avail.maxX - finalW }
+        if y < avail.minY { y = avail.minY }
+        if y + finalH > avail.maxY { y = avail.maxY - finalH }
+
+        let newFrame = NSRect(x: x, y: y, width: finalW, height: finalH)
+        win.setFrame(newFrame, display: true, animate: true)
+    }
+
+    @objc func viewFitToScreen() { autoFitWindow(toScreenFraction: 0.68) }
+    @objc func viewScale100()    { applyScaleFactor(1.0) }
+    @objc func viewScale75()     { applyScaleFactor(0.75) }
+    @objc func viewScale67()     { applyScaleFactor(0.67) }
+    @objc func viewScale50()     { applyScaleFactor(0.50) }
 }

@@ -43,11 +43,11 @@ typedef enum : uint8_t {
     NSMutableArray<NSNetService *> *_services;
     void (^_onUpdate)(NSArray<NSNetService *> *);
 
+    BOOL _dropKeyframePending;
     NSUInteger _droppedVideoFrames;
     NSUInteger _framesTransmitted;
     NSUInteger _bytesTransmitted;
 }
-
 @synthesize droppedVideoFrames = _droppedVideoFrames;
 @synthesize framesTransmitted = _framesTransmitted;
 @synthesize bytesTransmitted = _bytesTransmitted;
@@ -156,47 +156,52 @@ static inline void run_on_main(dispatch_block_t block) {
     _hasSpace = NO;
     _crypto = nil;
     _clientNonce = nil;
+    _dropKeyframePending = NO;
 }
 
 - (void)sendType:(SMIRType)type payload:(NSData *)payload {
-    if (_state != NetStateEncrypted || !_crypto) return;
+    run_on_main(^{
+        if (self->_state != NetStateEncrypted || !self->_crypto) return;
 
-    // Realtime Video Backpressure:
-    // If output buffer is backed up (> 40 KB, approx 3-5 frames of lag),
-    // drop this video frame BEFORE encryption so the AES-GCM sequence counter
-    // stays strictly monotonic for sent packets, and tell VideoEncoder to force an IDR keyframe.
-    if (type == SMIR_VIDEO_FRAME) {
-        if (_writeBuf.length > 40 * 1024) {
-            _droppedVideoFrames++;
-            _droppedInLastSec++;
-            if (self.onVideoFrameDropped) {
-                self.onVideoFrameDropped();
+        // Realtime Video Backpressure:
+        // If output buffer is backed up (> 40 KB, approx 4-6 frames of lag),
+        // drop this video frame BEFORE encryption so the AES-GCM sequence counter
+        // stays strictly monotonic for sent packets, and tell VideoEncoder to force an IDR keyframe.
+        if (type == SMIR_VIDEO_FRAME) {
+            if (self->_writeBuf.length > 40 * 1024) {
+                self->_droppedVideoFrames++;
+                self->_droppedInLastSec++;
+                if (!self->_dropKeyframePending) {
+                    self->_dropKeyframePending = YES;
+                    if (self.onVideoFrameDropped) {
+                        self.onVideoFrameDropped();
+                    }
+                }
+                return;
             }
+            self->_dropKeyframePending = NO;
+        }
+
+        // Mensaje plano: cabecera SMIR estándar + payload.
+        SMIRHeader h = { 0 };
+        h.magic  = CFSwapInt32HostToBig(SMIR_MAGIC);
+        h.type   = (uint8_t)type;
+        h.length = CFSwapInt32HostToBig((uint32_t)payload.length);
+
+        NSMutableData *plain = [NSMutableData dataWithBytes:&h length:sizeof(h)];
+        if (payload.length) [plain appendData:payload];
+
+        NSData *encrypted = [self->_crypto encrypt:plain];
+        if (!encrypted) {
+            NSLog(@"[Net] encrypt failed");
             return;
         }
-    }
 
-    // Mensaje plano: cabecera SMIR estándar + payload.
-    SMIRHeader h = { 0 };
-    h.magic  = CFSwapInt32HostToBig(SMIR_MAGIC);
-    h.type   = (uint8_t)type;
-    h.length = CFSwapInt32HostToBig((uint32_t)payload.length);
+        uint32_t lenBE = CFSwapInt32HostToBig((uint32_t)encrypted.length);
+        NSMutableData *wire = [NSMutableData dataWithCapacity:4 + encrypted.length];
+        [wire appendBytes:&lenBE length:4];
+        [wire appendData:encrypted];
 
-    NSMutableData *plain = [NSMutableData dataWithBytes:&h length:sizeof(h)];
-    if (payload.length) [plain appendData:payload];
-
-    NSData *encrypted = [_crypto encrypt:plain];
-    if (!encrypted) {
-        NSLog(@"[Net] encrypt failed");
-        return;
-    }
-
-    uint32_t lenBE = CFSwapInt32HostToBig((uint32_t)encrypted.length);
-    NSMutableData *wire = [NSMutableData dataWithCapacity:4 + encrypted.length];
-    [wire appendBytes:&lenBE length:4];
-    [wire appendData:encrypted];
-
-    run_on_main(^{
         [self->_writeBuf appendData:wire];
         if (type == SMIR_VIDEO_FRAME) {
             self->_framesTransmitted++;
@@ -321,20 +326,7 @@ static inline void run_on_main(dispatch_block_t block) {
             _crypto = [[SMIRCrypto alloc] init];
             _crypto.key = sessionKey;
             _state = NetStateEncrypted;
-            const uint8_t *pk = pwdKDF.bytes;
-            const uint8_t *sk = sessionKey.bytes;
-            const uint8_t *st = salt.bytes;
-            NSString *dbgLine = [NSString stringWithFormat:
-                @"DBG pwd.utf8=%lu pwdKDF=%02x%02x%02x%02x sharedFP=%02x%02x%02x%02x sessKey=%02x%02x%02x%02x salt=%02x%02x%02x%02x pwd1stChar=%02x\n",
-                (unsigned long)[_password lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
-                pk[0],pk[1],pk[2],pk[3],
-                ((uint8_t*)ikm.bytes)[0],((uint8_t*)ikm.bytes)[1],((uint8_t*)ikm.bytes)[2],((uint8_t*)ikm.bytes)[3],
-                sk[0],sk[1],sk[2],sk[3],
-                st[0],st[1],st[2],st[3],
-                _password.length > 0 ? [_password characterAtIndex:0] : 0];
-            [[dbgLine dataUsingEncoding:NSUTF8StringEncoding]
-                writeToFile:@"/var/mobile/Library/Preferences/com.example.screenmirror.dbg.log" atomically:YES];
-            NSLog(@"[Net] %@", dbgLine);
+            [[NSFileManager defaultManager] removeItemAtPath:@"/var/mobile/Library/Preferences/com.example.screenmirror.dbg.log" error:nil];
             NSLog(@"[Net] auth completada — canal cifrado: %@ (FS: X25519 ephemeral)", _crypto.backendName);
             [self.delegate networkClientDidConnect:self];
         } else if (_state == NetStateEncrypted) {

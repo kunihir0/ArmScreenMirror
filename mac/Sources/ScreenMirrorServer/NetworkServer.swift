@@ -199,16 +199,7 @@ final class NetworkServer {
                 let info = "SMIR-session-key-v2".data(using: .utf8)!
                 let sessionKey = SMIRCrypto.hkdfSHA256(ikm: ikm, salt: salt, info: info, length: 32)
                 peer.crypto.key = SymmetricKey(data: sessionKey)
-                let sharedFP: (UInt8,UInt8,UInt8,UInt8) = shared.withUnsafeBytes { p in
-                    let b = p.bindMemory(to: UInt8.self)
-                    return (b[0], b[1], b[2], b[3])
-                }
-                NSLog("[NetworkServer] DBG pwd.utf8=%d bytes pwdKDF[0..3]=%02x%02x%02x%02x sharedFP[0..3]=%02x%02x%02x%02x sessKey[0..3]=%02x%02x%02x%02x salt[0..3]=%02x%02x%02x%02x",
-                      password.utf8.count,
-                      pwdKDF[0], pwdKDF[1], pwdKDF[2], pwdKDF[3],
-                      sharedFP.0, sharedFP.1, sharedFP.2, sharedFP.3,
-                      sessionKey[0], sessionKey[1], sessionKey[2], sessionKey[3],
-                      salt[0], salt[1], salt[2], salt[3])
+                NSLog("[NetworkServer] auth exitosa — canal cifrado (FS: X25519 ephemeral)")
 
                 // 4) Enviar HELLO de respuesta: 'SMIH' + ver + flags + 2 reserved + 16 nonce + 32 pubkey.
                 var helloResp = Data()
@@ -259,6 +250,12 @@ final class NetworkServer {
     }
 
     func send(_ msg: SMIRMessage, to conn: NWConnection) {
+        queue.async { [weak self] in
+            self?.sendOnQueue(msg, to: conn)
+        }
+    }
+
+    private func sendOnQueue(_ msg: SMIRMessage, to conn: NWConnection) {
         guard let peer = peers[ObjectIdentifier(conn)], peer.state == .encrypted else { return }
         let plain = msg.encoded()
         guard let enc = peer.crypto.encrypt(plain) else {

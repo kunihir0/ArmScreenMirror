@@ -27,7 +27,8 @@ typedef enum { BackendNone, BackendCAR, BackendUIPRIV } CaptureBackend;
     BOOL              _busy;
     CaptureBackend    _backend;
     NSUInteger        _consecutiveBlack;
-
+    NSUInteger        _carFailCount;
+    NSUInteger        _carProbeCounter;
     // Detección de frame estático: 16x16 muestras del canal B + memcmp.
     uint8_t           _lastSamples[256];
     BOOL              _haveLastSamples;
@@ -236,17 +237,38 @@ static BOOL bytes_unchanged(const void *base, size_t bpr, size_t w, size_t h,
             kr = _fnRenderDisplay(0, NULL, _surface, 0, 0);
         }
         if (kr == KERN_SUCCESS) {
+            _carFailCount = 0;
             _framesCaptured++;
             uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
             [self.delegate screenCapture:self didCaptureBuffer:_wrappedPB pts:ptsUs];
         } else {
+            _carFailCount++;
             _lastError = [NSString stringWithFormat:@"CARenderDisplay kr=%d", kr];
-            if (_fnUICreateScreen) {
-                NSLog(@"[ScreenCapture] CARenderDisplay failed (kr=%d), falling back to UIPRIV", kr);
+            if (_carFailCount >= 3 && _fnUICreateScreen) {
+                NSLog(@"[ScreenCapture] CARenderDisplay failed 3 times (kr=%d), temporarily falling back to UIPRIV", kr);
                 _backend = BackendUIPRIV;
+                _carProbeCounter = 0;
             }
         }
     } else if (_backend == BackendUIPRIV) {
+        // Periodically probe CARenderServer every ~60 ticks (~2s at 30fps) to see if hardware capture recovered.
+        if (_fnRenderDisplay && _surface && ++_carProbeCounter >= 60) {
+            _carProbeCounter = 0;
+            kern_return_t probeKr = _fnRenderDisplay(0, CFSTR("LCD"), _surface, 0, 0);
+            if (probeKr != KERN_SUCCESS) {
+                probeKr = _fnRenderDisplay(0, NULL, _surface, 0, 0);
+            }
+            if (probeKr == KERN_SUCCESS) {
+                NSLog(@"[ScreenCapture] CARenderDisplay probe succeeded, recovering BackendCAR");
+                _backend = BackendCAR;
+                _carFailCount = 0;
+                _framesCaptured++;
+                uint64_t ptsUs = (uint64_t)((CFAbsoluteTimeGetCurrent() - _startTime) * 1e6);
+                [self.delegate screenCapture:self didCaptureBuffer:_wrappedPB pts:ptsUs];
+                _busy = NO;
+                return;
+            }
+        }
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         UIImage *ui = (__bridge_transfer UIImage *)_fnUICreateScreen();
         CFAbsoluteTime t1 = CFAbsoluteTimeGetCurrent();

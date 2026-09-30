@@ -9,3 +9,5 @@ backup_baseline/
 .DS_Store
 *.swp
 *~
+
+ios/packages/*.deb
