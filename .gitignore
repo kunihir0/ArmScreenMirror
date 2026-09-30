@@ -1,0 +1,11 @@
+# Build directories
+.theos/
+ios/.theos/
+ios/control-app/.theos/
+mac/.build/
+
+# Backups and temporary files
+backup_baseline/
+.DS_Store
+*.swp
+*~

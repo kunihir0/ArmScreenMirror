@@ -23,7 +23,7 @@ ScreenMirror_FILES = \
     src/Crypto.m \
     src/X25519.c
 
-ScreenMirror_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CoreVideo CoreMedia VideoToolbox IOSurface Security
+ScreenMirror_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore CoreVideo CoreMedia VideoToolbox IOSurface Security Accelerate
 ScreenMirror_CFLAGS  = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-nullability-completeness -Wno-error=unguarded-availability-new
 ScreenMirror_LDFLAGS = -Wl,-segalign,4000
 

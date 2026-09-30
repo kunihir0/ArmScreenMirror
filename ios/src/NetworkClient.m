@@ -42,6 +42,22 @@ typedef enum : uint8_t {
     NSNetServiceBrowser *_browser;
     NSMutableArray<NSNetService *> *_services;
     void (^_onUpdate)(NSArray<NSNetService *> *);
+
+    NSUInteger _droppedVideoFrames;
+    NSUInteger _framesTransmitted;
+    NSUInteger _bytesTransmitted;
+}
+
+@synthesize droppedVideoFrames = _droppedVideoFrames;
+@synthesize framesTransmitted = _framesTransmitted;
+@synthesize bytesTransmitted = _bytesTransmitted;
+@synthesize droppedInLastSec = _droppedInLastSec;
+@synthesize bytesTransmittedInSec = _bytesTransmittedInSec;
+@synthesize framesTransmittedInSec = _framesTransmittedInSec;
+@synthesize onVideoFrameDropped = _onVideoFrameDropped;
+
+- (NSUInteger)writeQueueBytes {
+    return _writeBuf.length;
 }
 
 - (instancetype)init {
@@ -116,6 +132,21 @@ static inline void run_on_main(dispatch_block_t block) {
     });
 }
 
+- (void)_applySocketOptions {
+    if (!_out) return;
+    CFDataRef socketData = (__bridge CFDataRef)[_out propertyForKey:(__bridge NSString *)kCFStreamPropertySocketNativeHandle];
+    if (socketData && CFDataGetLength(socketData) >= sizeof(CFSocketNativeHandle)) {
+        CFSocketNativeHandle sock = -1;
+        CFDataGetBytes(socketData, CFRangeMake(0, sizeof(sock)), (UInt8 *)&sock);
+        if (sock >= 0) {
+            int on = 1;
+            setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+            setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+            NSLog(@"[Net] TCP_NODELAY & SO_NOSIGPIPE configured on fd=%d", sock);
+        }
+    }
+}
+
 - (void)disconnect {
     if (_in)  { [_in  close]; [_in  removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes]; _in = nil; }
     if (_out) { [_out close]; [_out removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes]; _out = nil; }
@@ -129,6 +160,21 @@ static inline void run_on_main(dispatch_block_t block) {
 
 - (void)sendType:(SMIRType)type payload:(NSData *)payload {
     if (_state != NetStateEncrypted || !_crypto) return;
+
+    // Realtime Video Backpressure:
+    // If output buffer is backed up (> 40 KB, approx 3-5 frames of lag),
+    // drop this video frame BEFORE encryption so the AES-GCM sequence counter
+    // stays strictly monotonic for sent packets, and tell VideoEncoder to force an IDR keyframe.
+    if (type == SMIR_VIDEO_FRAME) {
+        if (_writeBuf.length > 40 * 1024) {
+            _droppedVideoFrames++;
+            _droppedInLastSec++;
+            if (self.onVideoFrameDropped) {
+                self.onVideoFrameDropped();
+            }
+            return;
+        }
+    }
 
     // Mensaje plano: cabecera SMIR estándar + payload.
     SMIRHeader h = { 0 };
@@ -152,6 +198,12 @@ static inline void run_on_main(dispatch_block_t block) {
 
     run_on_main(^{
         [self->_writeBuf appendData:wire];
+        if (type == SMIR_VIDEO_FRAME) {
+            self->_framesTransmitted++;
+            self->_framesTransmittedInSec++;
+        }
+        self->_bytesTransmitted += wire.length;
+        self->_bytesTransmittedInSec += wire.length;
         [self _drainWrite];
     });
 }
@@ -168,7 +220,7 @@ static inline void run_on_main(dispatch_block_t block) {
 - (void)stream:(NSStream *)stream handleEvent:(NSStreamEvent)event {
     switch (event) {
         case NSStreamEventOpenCompleted:
-            // Se notifica el "connected" SOLO al completarse la auth.
+            [self _applySocketOptions];
             break;
 
         case NSStreamEventHasSpaceAvailable:

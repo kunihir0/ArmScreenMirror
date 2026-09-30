@@ -16,7 +16,7 @@ echo "==> Compilando release…"
 echo "==> Generando icono…"
 rm -rf "$ICON_TMP"
 mkdir -p "$ICON_TMP/AppIcon.iconset"
-swift "$REPO_ROOT/scripts/generate_icon.swift" "$ICON_TMP/icon_1024.png"
+xcrun swift "$REPO_ROOT/scripts/generate_icon.swift" "$ICON_TMP/icon_1024.png"
 
 # sips reescala; iconutil sólo acepta los nombres exactos abajo.
 for s in 16 32 64 128 256 512 1024; do

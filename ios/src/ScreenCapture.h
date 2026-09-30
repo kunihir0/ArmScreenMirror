@@ -22,8 +22,11 @@
 @property (nonatomic, readonly) NSUInteger framesBlack;
 @property (nonatomic, readonly) NSString  *backendName;
 @property (nonatomic, readonly) NSString  *lastError;
+@property (nonatomic, readonly) double     avgCaptureTimeMs;
+@property (nonatomic, readonly) double     maxCaptureTimeMs;
 
 - (BOOL)start;
 - (void)stop;
+- (void)resetIntervalTiming;
 
 @end

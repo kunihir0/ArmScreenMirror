@@ -10,9 +10,10 @@
 
 - (instancetype)init {
     if ((self = [super init])) {
-        _bitrate = 800 * 1000;
-        _keyframeInterval = 240;
+        _bitrate = 1500 * 1000;
+        _keyframeInterval = 120;
         _quality = 0.5f;
+        _fps = 30;
     }
     return self;
 }
@@ -31,8 +32,14 @@ static void EncoderCallback(void *outputCallbackRefCon,
 }
 
 - (BOOL)startWithWidth:(int)w height:(int)h {
+    return [self startWithWidth:w height:h fps:_fps > 0 ? _fps : 30];
+}
+
+- (BOOL)startWithWidth:(int)w height:(int)h fps:(NSInteger)fps {
     [self stop];
-    _w = w; _h = h; _sentConfig = NO;
+    _w = w; _h = h;
+    _fps = fps > 0 ? fps : 30;
+    _sentConfig = NO;
 
     NSDictionary *src = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
@@ -45,7 +52,7 @@ static void EncoderCallback(void *outputCallbackRefCon,
         NULL, (__bridge CFDictionaryRef)src, NULL,
         EncoderCallback, (__bridge void *)self,
         &_session);
-    NSLog(@"[VideoEncoder] VTCompressionSessionCreate w=%d h=%d s=%d session=%p", w, h, (int)s, _session);
+    NSLog(@"[VideoEncoder] VTCompressionSessionCreate w=%d h=%d fps=%ld s=%d session=%p", w, h, (long)_fps, (int)s, _session);
     if (s != noErr) {
         return NO;
     }
@@ -70,8 +77,8 @@ static void EncoderCallback(void *outputCallbackRefCon,
     VTSessionSetProperty(_session, kVTCompressionPropertyKey_MaxKeyFrameInterval, kn);
     CFRelease(kn);
 
-    int fps = 15;
-    CFNumberRef fr = CFNumberCreate(NULL, kCFNumberIntType, &fps);
+    int fpsVal = (int)_fps;
+    CFNumberRef fr = CFNumberCreate(NULL, kCFNumberIntType, &fpsVal);
     VTSessionSetProperty(_session, kVTCompressionPropertyKey_ExpectedFrameRate, fr);
     CFRelease(fr);
 
@@ -102,7 +109,8 @@ static void EncoderCallback(void *outputCallbackRefCon,
         return;
     }
     CMTime pts = CMTimeMake((int64_t)ptsUs, 1000000);
-    CMTime dur = CMTimeMake(1, 30);
+    int32_t fpsVal = (int32_t)(_fps > 0 ? _fps : 30);
+    CMTime dur = CMTimeMake(1, fpsVal);
     NSDictionary *frameProps = nil;
     if (_forceKey) {
         frameProps = @{ (id)kVTEncodeFrameOptionKey_ForceKeyFrame: @YES };

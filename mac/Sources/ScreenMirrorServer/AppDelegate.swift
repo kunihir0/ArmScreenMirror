@@ -75,12 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker = p
     }
 
-    private func openStreamingWindow(for descriptor: DeviceDescriptor?) {
+    @discardableResult
+    func openStreamingWindow(for descriptor: DeviceDescriptor?) -> MainWindowController {
+        picker?.close()
+        picker = nil
         let c = MainWindowController(targetDevice: descriptor)
         c.showWindow(nil)
         c.window?.makeKeyAndOrderFront(nil)
         controller = c                  // most recent — used by menu shortcuts
         controllers.append(c)
+        return c
     }
 
     /// Closing one streaming window doesn't end the session — others may

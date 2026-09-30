@@ -14,8 +14,10 @@
 @property (nonatomic, assign) NSInteger bitrate;          // bps cap; default 800 Kbps
 @property (nonatomic, assign) NSInteger keyframeInterval; // frames; default 240
 @property (nonatomic, assign) float     quality;          // 0..1 VTQuality; default 0.5
+@property (nonatomic, assign) NSInteger fps;              // configured capture FPS; default 30
 
 - (BOOL)startWithWidth:(int)w height:(int)h;
+- (BOOL)startWithWidth:(int)w height:(int)h fps:(NSInteger)fps;
 - (void)stop;
 - (void)encodePixelBuffer:(CVPixelBufferRef)pb pts:(uint64_t)ptsUs;
 - (void)forceKeyframe;

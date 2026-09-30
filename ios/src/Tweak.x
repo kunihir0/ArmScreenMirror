@@ -24,6 +24,9 @@
     BOOL _connecting;
     NSString *_host;
     float _savedVolumeBeforeMute;  // volume level remembered for unmute
+    NSUInteger _framesEncoded;
+    NSUInteger _lastReportedCapFrames;
+    NSUInteger _lastReportedEncFrames;
 }
 
 + (instancetype)shared {
@@ -90,6 +93,37 @@
         if (!self->_net.connected && !self->_connecting) [self _attemptConnect];
     }];
     [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+
+    // Telemetría periódica una vez por segundo.
+    NSTimer *telemetry = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        if (!self->_net.connected || !self->_cap) return;
+        [self _logTelemetry];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:telemetry forMode:NSRunLoopCommonModes];
+}
+
+- (void)_logTelemetry {
+    NSUInteger currentCap = _cap.framesCaptured;
+    NSUInteger capFps = currentCap >= _lastReportedCapFrames ? (currentCap - _lastReportedCapFrames) : currentCap;
+    _lastReportedCapFrames = currentCap;
+
+    NSUInteger currentEnc = _framesEncoded;
+    NSUInteger encFps = currentEnc >= _lastReportedEncFrames ? (currentEnc - _lastReportedEncFrames) : currentEnc;
+    _lastReportedEncFrames = currentEnc;
+
+    NSUInteger txBytes = _net.bytesTransmittedInSec;
+    _net.bytesTransmittedInSec = 0;
+
+    NSUInteger dropped = _net.droppedInLastSec;
+    _net.droppedInLastSec = 0;
+
+    double avgCapMs = _cap.avgCaptureTimeMs;
+    double maxCapMs = _cap.maxCaptureTimeMs;
+    [_cap resetIntervalTiming];
+
+    NSLog(@"[SMIR Telemetry] backend=%@ reqFps=%ld capFps=%lu encFps=%lu skipped=0 capAvg=%.2fms capMax=%.2fms txKbps=%lu queueBytes=%lu droppedFrames=%lu",
+          _cap.backendName, (long)_cap.fps, (unsigned long)capFps, (unsigned long)encFps,
+          avgCapMs, maxCapMs, (unsigned long)(txBytes * 8 / 1000), (unsigned long)_net.writeQueueBytes, (unsigned long)dropped);
 }
 
 - (void)_reloadAndApply {
@@ -138,7 +172,13 @@
 
     _inj = [[TouchInjector alloc] initWithPointSize:[UIScreen mainScreen].bounds.size];
 
-    [self _startPipelineWithScale:0.4 fps:15 idleFps:4 bitrate:800000 quality:0.5];
+    __weak typeof(self) weakSelf = self;
+    _net.onVideoFrameDropped = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf) [strongSelf->_enc forceKeyframe];
+    };
+
+    [self _startPipelineWithScale:0.40 fps:30 idleFps:30 bitrate:1500000 quality:0.50];
 
     struct utsname u; uname(&u);
     NSString *device = [NSString stringWithUTF8String:u.machine];
@@ -172,6 +212,9 @@
 {
     [_cap stop]; _cap = nil;
     [_enc stop]; _enc = nil;
+    _lastReportedCapFrames = 0;
+    _lastReportedEncFrames = 0;
+    _framesEncoded = 0;
 
     _cap = [[ScreenCapture alloc] init];
     _cap.captureScale = scale;
@@ -184,7 +227,8 @@
     _enc.quality  = quality;
     _enc.delegate = self;
     BOOL encOK = [_enc startWithWidth:(int)_cap.displaySize.width
-                               height:(int)_cap.displaySize.height];
+                               height:(int)_cap.displaySize.height
+                                  fps:fps];
     if (!encOK) NSLog(@"[SMIR] encoder no pudo arrancar");
 
     if (![_cap start]) {
@@ -318,11 +362,11 @@
             uint8_t preset = ((const uint8_t *)payload.bytes)[0];
             CGFloat scale; NSInteger fps, idleFps, bitrate; float q;
             switch (preset) {
-                case 0:  scale = 0.30; fps = 10; idleFps = 3; bitrate =  400000; q = 0.35; break;
-                case 2:  scale = 0.65; fps = 24; idleFps = 8; bitrate = 2500000; q = 0.70; break;
-                default: scale = 0.40; fps = 15; idleFps = 4; bitrate =  800000; q = 0.50; break;
+                case 0:  scale = 0.30; fps = 30; idleFps = 30; bitrate =  800000; q = 0.40; break;
+                case 2:  scale = 0.45; fps = 30; idleFps = 30; bitrate = 2200000; q = 0.55; break;
+                default: scale = 0.40; fps = 30; idleFps = 30; bitrate = 1500000; q = 0.50; break;
             }
-            NSLog(@"[SMIR] cambio de calidad → preset=%u", preset);
+            NSLog(@"[SMIR] cambio de calidad → preset=%u scale=%.2f fps=%ld bitrate=%ld", preset, scale, (long)fps, (long)bitrate);
             [self _startPipelineWithScale:scale fps:fps idleFps:idleFps
                                   bitrate:bitrate quality:q];
             // Reenvía handshake (por si el orientation cambió, etc.)
@@ -363,6 +407,7 @@
 }
 
 - (void)videoEncoder:(VideoEncoder *)enc didProduceFrame:(NSData *)annexB keyframe:(BOOL)keyframe pts:(uint64_t)ptsUs {
+    _framesEncoded++;
     NSMutableData *d = [NSMutableData dataWithCapacity:annexB.length + 12];
     uint8_t hdr[4] = { keyframe ? 1 : 0, 0, 0, 0 };
     [d appendBytes:hdr length:4];

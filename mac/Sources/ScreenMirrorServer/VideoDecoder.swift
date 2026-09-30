@@ -44,49 +44,48 @@ final class VideoDecoder {
 
     /// Procesa un frame en Annex-B. Detecta SPS/PPS embebidos por si llegan inline.
     func decodeAnnexB(_ data: Data, pts: UInt64) {
-        // Partir en NALUs por start code 00 00 00 01 ó 00 00 01.
-        var nalus: [Data] = []
-        var i = 0
-        let bytes = [UInt8](data)
-        let n = bytes.count
-        while i < n {
-            // localizar start code
-            var sc = -1
-            var scLen = 0
-            var j = i
-            while j + 2 < n {
-                if bytes[j] == 0 && bytes[j+1] == 0 {
-                    if bytes[j+2] == 1 { sc = j; scLen = 3; break }
-                    if j + 3 < n && bytes[j+2] == 0 && bytes[j+3] == 1 { sc = j; scLen = 4; break }
-                }
-                j += 1
-            }
-            if sc < 0 { break }
-            // siguiente start code
-            var k = sc + scLen
-            var next = -1
-            while k + 2 < n {
-                if bytes[k] == 0 && bytes[k+1] == 0 && (bytes[k+2] == 1 || (k+3 < n && bytes[k+2] == 0 && bytes[k+3] == 1)) {
-                    next = k; break
-                }
-                k += 1
-            }
-            let end = next < 0 ? n : next
-            let nalu = Data(bytes[(sc+scLen)..<end])
-            if !nalu.isEmpty { nalus.append(nalu) }
-            i = end
-        }
-
         var spsBuf: Data?, ppsBuf: Data?
         var pictureNALUs: [Data] = []
-        for nalu in nalus {
-            let type = nalu[0] & 0x1F
-            switch type {
-            case 7: spsBuf = nalu
-            case 8: ppsBuf = nalu
-            default: pictureNALUs.append(nalu)
+
+        data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) in
+            guard let bytes = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let n = rawBuffer.count
+            var i = 0
+            while i < n {
+                var sc = -1
+                var scLen = 0
+                var j = i
+                while j + 2 < n {
+                    if bytes[j] == 0 && bytes[j+1] == 0 {
+                        if bytes[j+2] == 1 { sc = j; scLen = 3; break }
+                        if j + 3 < n && bytes[j+2] == 0 && bytes[j+3] == 1 { sc = j; scLen = 4; break }
+                    }
+                    j += 1
+                }
+                if sc < 0 { break }
+                let startPayload = sc + scLen
+                var k = startPayload
+                var next = -1
+                while k + 2 < n {
+                    if bytes[k] == 0 && bytes[k+1] == 0 && (bytes[k+2] == 1 || (k+3 < n && bytes[k+2] == 0 && bytes[k+3] == 1)) {
+                        next = k; break
+                    }
+                    k += 1
+                }
+                let end = next < 0 ? n : next
+                if end > startPayload {
+                    let nalu = data.subdata(in: startPayload..<end)
+                    let type = bytes[startPayload] & 0x1F
+                    switch type {
+                    case 7: spsBuf = nalu
+                    case 8: ppsBuf = nalu
+                    default: pictureNALUs.append(nalu)
+                    }
+                }
+                i = end
             }
         }
+
         if let s = spsBuf, let p = ppsBuf {
             self.configure(spsLen: UInt32(s.count), sps: s, ppsLen: UInt32(p.count), pps: p)
         }

@@ -18,6 +18,15 @@
 /// Debe coincidir con la contraseña en el Mac. Sin contraseña no se conecta.
 @property (nonatomic, copy) NSString *password;
 
+@property (nonatomic, readonly) NSUInteger writeQueueBytes;
+@property (nonatomic, readonly) NSUInteger droppedVideoFrames;
+@property (nonatomic, readonly) NSUInteger framesTransmitted;
+@property (nonatomic, readonly) NSUInteger bytesTransmitted;
+@property (nonatomic, assign)   NSUInteger droppedInLastSec;
+@property (nonatomic, assign)   NSUInteger bytesTransmittedInSec;
+@property (nonatomic, assign)   NSUInteger framesTransmittedInSec;
+@property (nonatomic, copy, nullable) void (^onVideoFrameDropped)(void);
+
 - (void)connectToHost:(NSString *)host port:(uint16_t)port;
 - (void)disconnect;
 - (void)sendType:(SMIRType)type payload:(NSData *)payload;

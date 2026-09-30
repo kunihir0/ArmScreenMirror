@@ -22,11 +22,11 @@ enum Quality: UInt8, CaseIterable {
     /// idleFps: tasa de captura cuando no hay cambios (modo ahorro).
     /// bitrate: cap superior del encoder H.264 (bps).
     /// h264Quality: VTCompressionPropertyKey_Quality (0..1).
-    var scale:       Double { switch self { case .low: 0.30; case .medium: 0.40; case .high: 0.65 } }
-    var fps:         UInt8  { switch self { case .low: 10;   case .medium: 15;   case .high: 24   } }
-    var idleFps:     UInt8  { switch self { case .low: 3;    case .medium: 4;    case .high: 8    } }
-    var bitrate:     UInt32 { switch self { case .low: 400_000; case .medium: 800_000; case .high: 2_500_000 } }
-    var h264Quality: Float  { switch self { case .low: 0.35; case .medium: 0.50; case .high: 0.70 } }
+    var scale:       Double { switch self { case .low: 0.30; case .medium: 0.40; case .high: 0.45 } }
+    var fps:         UInt8  { switch self { case .low: 30;   case .medium: 30;   case .high: 30   } }
+    var idleFps:     UInt8  { switch self { case .low: 30;   case .medium: 30;   case .high: 30   } }
+    var bitrate:     UInt32 { switch self { case .low: 800_000; case .medium: 1_500_000; case .high: 2_200_000 } }
+    var h264Quality: Float  { switch self { case .low: 0.40; case .medium: 0.50; case .high: 0.55 } }
 }
 
 enum QualityStore {

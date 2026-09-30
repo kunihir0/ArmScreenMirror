@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import AppKit
 
 /// One TCP listener can only bind to port 4878 once, so we centralize
 /// every NetworkServer event here and fan it out to whichever streaming
@@ -109,7 +110,21 @@ final class ConnectionRouter: NetworkServerDelegate {
         let alive = livingWindows()
         let exact = alive.first { $0.targetDevice == descriptor && !$0.hasActiveClient }
         let any   = alive.first { $0.targetDevice == nil          && !$0.hasActiveClient }
-        guard let win = exact ?? any else {
+        var chosenWin = exact ?? any
+        if chosenWin == nil {
+            if Thread.isMainThread {
+                if let appDel = NSApp.delegate as? AppDelegate {
+                    chosenWin = appDel.openStreamingWindow(for: descriptor)
+                }
+            } else {
+                DispatchQueue.main.sync {
+                    if let appDel = NSApp.delegate as? AppDelegate {
+                        chosenWin = appDel.openStreamingWindow(for: descriptor)
+                    }
+                }
+            }
+        }
+        guard let win = chosenWin else {
             NSLog("[Router] no window for %@; dropping connection", descriptor.modelId)
             client.cancel()
             pending.removeValue(forKey: key)
